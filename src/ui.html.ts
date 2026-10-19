@@ -383,7 +383,7 @@ ${CLOUD_BADGE_CSS}
 
               <!-- 资源标题 -->
               <h3 class="text-sm sm:text-base font-semibold text-slate-800 line-clamp-2 hover:text-blue-600 transition leading-snug">
-                <a :href="item.url" target="_blank" rel="noopener noreferrer">
+                <a :href="item.url" target="_blank" rel="noopener noreferrer" @click="openLink($event, item.url)">
                   {{ item.note || item.title || '网盘分享链接' }}
                 </a>
               </h3>
@@ -425,6 +425,7 @@ ${CLOUD_BADGE_CSS}
                   :href="item.url"
                   target="_blank"
                   rel="noopener noreferrer"
+                  @click="openLink($event, item.url)"
                   class="px-3 py-1 bg-blue-50 hover:bg-blue-600 text-blue-600 hover:text-white rounded-lg font-medium transition text-[11px] sm:text-xs flex items-center space-x-1"
                 >
                   <span>直达</span>
@@ -663,6 +664,17 @@ ${CLOUD_BADGE_CSS}
           }).catch(() => {
             prompt('请手动复制：', txt);
           });
+        };
+
+        // 结果链接改由 window.open 打开新标签页：小米浏览器等会忽略 <a target="_blank">，
+        // 直接在当前页跳转，搜索结果就丢了；但它们遵从点击时调用的 window.open。
+        // <a> 上的 href/target 保留，长按复制链接、桌面端修饰键点击仍按原生行为走。
+        const openLink = (e, url) => {
+          // magnet: / ed2k: 等交给浏览器默认处理（拉起本地下载软件），不额外开空白标签页
+          if (!/^https?:/i.test(url || '')) return;
+          if (e.ctrlKey || e.metaKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          window.open(url, '_blank', 'noopener,noreferrer');
         };
 
         // 单个链接测活
@@ -977,6 +989,7 @@ ${CLOUD_BADGE_CSS}
           getStatusIcon,
           formatDateTime,
           copyText,
+          openLink,
           checkSingle,
           batchCheckCurrent,
           getCloudLabel,
