@@ -568,6 +568,17 @@ Content-Type: application/json
 > 为兼容早期调用方，顶层**同时保留**一份平铺的 `total` / `results` / `merged_by_type`（内容相同），
 > 代价是响应体会比只读 `data` 时大约一倍——新写的调用方请只用 `data`。
 
+#### 访问密码（兼容 `fish2018/pansou` 登录）：
+后台开启「前台访问密码」后，数据类接口需要令牌。可用盘搜的登录方式获取（`username` 会被忽略，只校验 `password`）：
+```http
+POST /api/auth/login
+Content-Type: application/json
+
+{ "username": "任意", "password": "前台访问密码" }
+```
+成功返回 `{ "token": "...", "expires_at": 1234567890, "username": "任意" }`，之后请求带 `Authorization: Bearer <token>` 即可（也可用 `X-Frontend-Token: <token>`，两者同时存在时优先后者）。
+令牌在后台修改前台密码前一直有效，`expires_at` 固定为 1 小时后，用于促使客户端定期重新登录（改密码后客户端最多 1 小时内恢复）。未开启前台密码时该接口返回 403。
+
 ---
 
 ### 2. 健康检查接口 `/api/health`

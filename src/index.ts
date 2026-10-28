@@ -119,10 +119,14 @@ async function requireFrontendAccess(
 ): Promise<boolean> {
   if (!isFrontendAuthEnabled(settings)) return true;
 
-  const token = (request.headers.get('X-Frontend-Token') || '').trim();
-  if (token) {
-    const expected = await frontendAccessToken(settings, env);
-    if (expected && tokenMatches(token, expected)) return true;
+  const expected = await frontendAccessToken(settings, env);
+  if (expected) {
+    // X-Frontend-Token 优先；其次兼容 fish2018/pansou 的 Authorization: Bearer <token>
+    const token = (request.headers.get('X-Frontend-Token') || '').trim();
+    if (token && tokenMatches(token, expected)) return true;
+
+    const bearer = (request.headers.get('Authorization') || '').replace(/^Bearer\s+/i, '').trim();
+    if (bearer && tokenMatches(bearer, expected)) return true;
   }
 
   return verifyAdminAuth(request, env);
@@ -294,6 +298,46 @@ export default {
         enabled: true,
         token: await frontendAccessToken(settings, env),
         expires_in: null // 无状态令牌，改密码即失效
+      });
+    }
+
+    // 1.4 兼容 fish2018/pansou 的登录接口 /api/auth/login
+    //     忽略 username，只用 password 校验前台访问密码，返回与 /api/frontend/auth 相同的令牌；
+    //     之后调用方按盘搜习惯带 `Authorization: Bearer <token>` 即可。
+    if (path === '/api/auth/login') {
+      if (request.method !== 'POST') {
+        return jsonResponse({ error: '请使用 POST 登录' }, 405);
+      }
+
+      let username = '';
+      let password = '';
+      try {
+        const body: any = await request.json();
+        username = typeof body?.username === 'string' ? body.username : '';
+        password = typeof body?.password === 'string' ? body.password.trim() : '';
+      } catch (e) {
+        password = '';
+      }
+
+      if (!password) {
+        return jsonResponse({ error: '参数错误：密码不能为空' }, 400);
+      }
+
+      const settings = await getSystemSettings(env);
+      if (!isFrontendAuthEnabled(settings)) {
+        return jsonResponse({ error: '认证功能未启用' }, 403);
+      }
+
+      if (!(await verifyFrontendPassword(password, settings, env))) {
+        return jsonResponse({ error: '用户名或密码错误' }, 401);
+      }
+
+      return jsonResponse({
+        token: await frontendAccessToken(settings, env),
+        // 令牌本身无状态、改密码才失效；这里只给 1 小时，促使客户端定期重新登录——
+        // MoonTVPlus 等客户端遇到 401 不会主动重登，改密码后要等到 expires_at 才恢复
+        expires_at: Math.floor(Date.now() / 1000) + 3600,
+        username
       });
     }
 
