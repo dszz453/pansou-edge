@@ -1,11 +1,4 @@
-import {
-  Env,
-  SystemSettings,
-  ResultCacheMode,
-  FrontendPasswordMode,
-  PluginConfig,
-  TransferCookieMap
-} from './types';
+import { Env, SystemSettings, ResultCacheMode, FrontendPasswordMode, PluginConfig } from './types';
 import {
   DEFAULT_CHANNELS,
   DEFAULT_PLUGINS,
@@ -91,29 +84,8 @@ export function buildDefaultSettings(env: Env): SystemSettings {
     showAutoCheck: true,
     // V1.3：前台默认不需要密码，开关打开后才要求登录
     frontendAuthEnabled: false,
-    frontendPasswordMode: 'reuse',
-    // V1.6：转存功能默认关闭，站长在后台确认风险后再开
-    transferEnabled: false,
-    // V1.6.1：站长统一配置的网盘 Cookie，出厂为空（访客需各自填写）
-    transferCookies: {}
+    frontendPasswordMode: 'reuse'
   };
-}
-
-/** 合法网盘键：只有这三家支持转存，其它键一律丢弃 */
-const TRANSFER_COOKIE_KEYS = ['quark', 'uc', 'baidu'] as const;
-
-/**
- * 归一化服务端网盘 Cookie：只接受字符串，去首尾空白，空串视为「未配置」。
- * 非字符串（对象/数组/数字）一律丢掉，避免脏数据让驱动拿到奇怪的值。
- */
-function normalizeTransferCookies(input: any): TransferCookieMap {
-  const out: TransferCookieMap = {};
-  if (!input || typeof input !== 'object') return out;
-  for (const k of TRANSFER_COOKIE_KEYS) {
-    const v = (input as any)[k];
-    if (typeof v === 'string' && v.trim()) out[k] = v.trim();
-  }
-  return out;
 }
 
 /**
@@ -193,11 +165,7 @@ function mergeWithDefaults(defaults: SystemSettings, saved: any): SystemSettings
     frontendPasswordHash:
       typeof saved.frontendPasswordHash === 'string' && saved.frontendPasswordHash
         ? saved.frontendPasswordHash
-        : undefined,
-    // V1.6：转存开关，缺失/非法值一律视为关闭（安全默认）
-    transferEnabled: saved.transferEnabled === true,
-    // V1.6.1：服务端网盘 Cookie；显式清空（空对象/空串）要生效，因此不做回退默认
-    transferCookies: normalizeTransferCookies(saved.transferCookies)
+        : undefined
   };
 
   // 插件配置一次性迁移：老 KV 里只有第三方聚合节点，不补就永远拿不到原生源。
