@@ -420,15 +420,26 @@ ${CLOUD_BADGE_CSS}
                   <span class="ml-1 hidden sm:inline">测活</span>
                 </button>
 
-                <!-- V1.6：转存到自己网盘（仅后台开启、且该网盘在支持列表内时显示） -->
+                <!-- V1.6.1：一键下载（仅后台开启、且该网盘在支持列表内时显示）
+                     点一下 = 自动转存到网盘目录 → 展开文件 → 直接开始下载 -->
+                <button
+                  v-if="canTransfer(item.cloudType)"
+                  @click="quickDownload(item)"
+                  class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg transition text-[11px] font-medium flex items-center space-x-1"
+                  title="自动转存到你配置的网盘，然后直接下载"
+                >
+                  <i class="fa-solid fa-download text-[10px]"></i>
+                  <span>下载</span>
+                </button>
+
+                <!-- 转存：可勾选文件、指定目录（进阶用法，图标按钮不占地方） -->
                 <button
                   v-if="canTransfer(item.cloudType)"
                   @click="openTransfer(item)"
                   class="px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-lg transition text-[11px] border border-indigo-200/60"
-                  title="转存到自己网盘的指定目录，再从网盘下载"
+                  title="转存到自己网盘的指定目录（可勾选文件）"
                 >
                   <i class="fa-solid fa-cloud-arrow-up text-[10px]"></i>
-                  <span class="ml-1 hidden sm:inline">转存</span>
                 </button>
 
                 <!-- 直达链接 -->
@@ -495,7 +506,8 @@ ${CLOUD_BADGE_CSS}
         <div class="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-slate-100">
           <div class="min-w-0">
             <h2 class="font-bold text-base text-slate-800 flex items-center gap-2">
-              <i class="fa-solid fa-cloud-arrow-up text-indigo-600"></i>转存到{{ tr.cap.label }}
+              <i class="fa-solid" :class="tr.quick ? 'fa-download text-indigo-600' : 'fa-cloud-arrow-up text-indigo-600'"></i>
+              {{ tr.quick ? '下载到' + (tr.cap.label || '网盘') : '转存到' + (tr.cap.label || '网盘') }}
             </h2>
             <p class="text-xs text-slate-400 mt-1 truncate" :title="tr.title || tr.url">{{ tr.title || tr.url }}</p>
           </div>
@@ -520,8 +532,8 @@ ${CLOUD_BADGE_CSS}
             </div>
           </div>
 
-          <!-- 网盘 Cookie -->
-          <div class="space-y-1.5">
+          <!-- 网盘 Cookie（一键下载成功后再显示就没意义了，只在需要用户补 Cookie 时露出） -->
+          <div v-if="!tr.quick || tr.step === 'cred'" class="space-y-1.5">
             <div class="flex items-center justify-between">
               <label class="text-xs font-semibold text-slate-600">{{ tr.cap.credential_label || '网盘 Cookie' }}</label>
               <a :href="tr.cap.cookie_site" target="_blank" rel="noopener noreferrer" class="text-[11px] text-blue-600 hover:underline flex items-center gap-1">
@@ -532,9 +544,12 @@ ${CLOUD_BADGE_CSS}
               v-model="tr.cred"
               rows="2"
               spellcheck="false"
-              :placeholder="'粘贴 ' + (tr.cap.cookie_key || 'Cookie') + ' 的值（也可粘贴整段 Cookie）'"
+              :placeholder="credReady(tr.kind) ? '可留空：本站已配置账号，留空即用站长账号转存' : '粘贴 ' + (tr.cap.cookie_key || 'Cookie') + ' 的值（也可粘贴整段 Cookie）'"
               class="w-full px-3 py-2 text-base font-mono text-xs border-2 border-slate-200 rounded-xl outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
             ></textarea>
+            <p v-if="credReady(tr.kind) && !tr.cred.trim()" class="text-[11px] text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-2.5 py-1.5 leading-relaxed">
+              <i class="fa-solid fa-circle-check mr-1"></i>本站已配置{{ tr.cap.label }}账号：留空即用站长账号转存下载，填自己的则以你的为准。
+            </p>
             <p class="text-[11px] text-slate-400 leading-relaxed">{{ cookieHint }}</p>
             <label class="flex items-center gap-2 text-xs text-slate-500 cursor-pointer select-none">
               <input type="checkbox" v-model="tr.remember" class="w-4 h-4 rounded text-indigo-600 focus:ring-0">
@@ -543,7 +558,7 @@ ${CLOUD_BADGE_CSS}
           </div>
 
           <!-- 目标目录 -->
-          <div class="space-y-1.5">
+          <div v-if="!tr.quick || tr.step === 'cred'" class="space-y-1.5">
             <label class="text-xs font-semibold text-slate-600">转存到目录</label>
             <div class="flex gap-2">
               <input
@@ -553,9 +568,9 @@ ${CLOUD_BADGE_CSS}
               />
               <button
                 @click="browseDir(tr.dir)"
-                :disabled="tr.busy || !tr.cred.trim()"
+                :disabled="tr.busy || (!tr.cred.trim() && !credReady(tr.kind))"
                 class="px-3 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs text-slate-600 font-medium disabled:opacity-50 flex items-center gap-1 shrink-0"
-                title="需要先填写 Cookie 才能浏览自己网盘的目录"
+                title="需要 Cookie（自己的或站长配置的）才能浏览网盘目录"
               >
                 <i class="fa-solid fa-folder-open text-[10px]"></i>浏览
               </button>
@@ -580,6 +595,23 @@ ${CLOUD_BADGE_CSS}
                 </button>
               </div>
             </div>
+          </div>
+
+          <!-- 一键下载进度（V1.6.1）：解析 → 转存 → 展开 → 下载，前端只能拿到整体结果，用时间轴给个反馈 -->
+          <div v-if="tr.step === 'auto'" class="space-y-3 py-1">
+            <div class="flex items-center gap-3">
+              <i class="fa-solid fa-circle-notch fa-spin text-indigo-600 text-lg"></i>
+              <div class="min-w-0">
+                <p class="text-sm font-semibold text-slate-700">{{ tr.stage || '正在解析分享…' }}</p>
+                <p class="text-[11px] text-slate-400 mt-0.5">已用时 {{ tr.elapsed }} 秒，整季剧集可能需要 10–30 秒</p>
+              </div>
+            </div>
+            <div class="h-1.5 rounded-full bg-slate-100 overflow-hidden">
+              <div class="h-full bg-gradient-to-r from-indigo-500 to-blue-500 rounded-full transition-all duration-500" :style="{ width: tr.progress + '%' }"></div>
+            </div>
+            <p class="text-[11px] text-slate-400 leading-relaxed">
+              会先把资源转存到 <span class="font-mono">{{ tr.dir }}</span>，再从网盘取直链下载；本站只做转发，不缓存文件。
+            </p>
           </div>
 
           <!-- 错误提示 -->
@@ -616,6 +648,15 @@ ${CLOUD_BADGE_CSS}
               <button @click="copyText(tr.savedPath, '目录路径已复制')" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium flex items-center gap-1">
                 <i class="fa-solid fa-copy text-[10px]"></i>复制路径
               </button>
+              <button
+                v-if="downloadable.length > 1"
+                @click="downloadAll"
+                :disabled="tr.dlAll"
+                class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-medium flex items-center gap-1 disabled:opacity-60"
+              >
+                <i class="fa-solid text-[10px]" :class="tr.dlAll ? 'fa-circle-notch fa-spin' : 'fa-download'"></i>
+                {{ tr.dlAll ? '下载中…' : '全部下载（' + downloadable.length + '）' }}
+              </button>
             </div>
             <div class="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-56 overflow-y-auto">
               <div v-for="it in tr.saved" :key="it.id" class="flex items-center gap-2.5 px-3 py-2">
@@ -633,7 +674,8 @@ ${CLOUD_BADGE_CSS}
               </div>
             </div>
             <p v-if="tr.pending" class="text-[11px] text-amber-600 leading-relaxed">网盘仍在后台处理部分文件，若下载报错请稍等片刻后再点下载。</p>
-            <p class="text-[11px] text-slate-400 leading-relaxed">下载由本站代理转发，大文件会显示为浏览器下载任务；PWA 全屏模式下同样可用。</p>
+            <p v-if="tr.truncated" class="text-[11px] text-amber-600 leading-relaxed">分享里文件较多，这里只列出了前 {{ tr.saved.length }} 个；其余请到上方「去网盘查看」里的目录找。</p>
+            <p class="text-[11px] text-slate-400 leading-relaxed">下载由本站代理转发，大文件会显示为浏览器下载任务；PWA 全屏模式下同样可用。若浏览器询问「是否允许下载多个文件」，请选择允许。</p>
           </div>
         </div>
 
@@ -641,19 +683,22 @@ ${CLOUD_BADGE_CSS}
         <div class="px-5 py-3 border-t border-slate-100 flex items-center gap-2 safe-bottom">
           <template v-if="tr.step === 'cred'">
             <button
-              @click="doPreview"
-              :disabled="tr.busy || (!tr.cred.trim() && !tr.cap.anonymous_preview)"
+              @click="tr.quick ? doAuto() : doPreview()"
+              :disabled="tr.busy || (!tr.cred.trim() && !credReady(tr.kind) && !tr.cap.anonymous_preview)"
               class="flex-1 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-semibold text-sm rounded-xl transition shadow-md shadow-indigo-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
             >
-              <i class="fa-solid" :class="tr.busy ? 'fa-circle-notch fa-spin' : 'fa-magnifying-glass'"></i>
-              <span>{{ tr.busy ? '解析中…' : '解析分享' }}</span>
+              <i class="fa-solid" :class="tr.busy ? 'fa-circle-notch fa-spin' : (tr.quick ? 'fa-download' : 'fa-magnifying-glass')"></i>
+              <span>{{ tr.busy ? (tr.quick ? '处理中…' : '解析中…') : (tr.quick ? '开始下载' : '解析分享') }}</span>
             </button>
+          </template>
+          <template v-else-if="tr.step === 'auto'">
+            <button @click="closeTransfer" class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-medium">关闭</button>
           </template>
           <template v-else-if="tr.step === 'files'">
             <button @click="tr.step = 'cred'" :disabled="tr.busy" class="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-medium disabled:opacity-50">上一步</button>
             <button
               @click="doSave"
-              :disabled="tr.busy || tr.selected.length === 0 || !tr.cred.trim()"
+              :disabled="tr.busy || tr.selected.length === 0 || (!tr.cred.trim() && !credReady(tr.kind))"
               class="flex-1 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-semibold text-sm rounded-xl transition shadow-md shadow-indigo-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
             >
               <i class="fa-solid" :class="tr.busy ? 'fa-circle-notch fa-spin' : 'fa-cloud-arrow-up'"></i>
@@ -735,6 +780,9 @@ ${CLOUD_BADGE_CSS}
            Worker 不落盘。网盘轮换凭据时会把新值带回来，这里顺手覆盖本地旧值。 */
         const transferEnabled = ref(false);
         const transferCaps = ref({});
+        /** V1.6.1：哪些网盘已在后台配好站长 Cookie（前端只拿到布尔值） */
+        const transferReady = ref({});
+        const credReady = (kind) => !!(kind && transferReady.value[kind]);
         const BS = String.fromCharCode(92);
         const normDir = (p) => {
           const segs = [];
@@ -782,12 +830,16 @@ ${CLOUD_BADGE_CSS}
           open: false, step: 'cred', busy: false, error: '', kind: '', cap: {}, url: '', pwd: '',
           cred: '', remember: true, dir: '/', needPwd: false, title: '',
           items: [], selected: [], saved: [], savedPath: '', pending: false,
-          browseOpen: false, browsePath: '/', browseEntries: [], browseLoading: false, dlId: ''
+          browseOpen: false, browsePath: '/', browseEntries: [], browseLoading: false, dlId: '',
+          // V1.6.1：一键下载（自动转存 → 直接开始下载）
+          quick: false, stage: '', progress: 0, elapsed: 0, dlAll: false, truncated: false
         });
         const tr = ref(emptyTr());
         const allSelected = computed(() =>
           tr.value.items.length > 0 && tr.value.selected.length === tr.value.items.length
         );
+        /** 结果清单里真正能下载的（文件夹不参与，文件夹在转存时已被展开） */
+        const downloadable = computed(() => (tr.value.saved || []).filter(x => x && !x.is_dir));
         const canTransfer = (type) => !!(transferEnabled.value && type && transferCaps.value[type]);
         const cookieHint = computed(() => COOKIE_HINTS[tr.value.kind] || '从网盘网页版的开发者工具中复制登录 Cookie 后粘贴到此处。');
 
@@ -812,7 +864,11 @@ ${CLOUD_BADGE_CSS}
         const trFriendly = (e) => {
           const c = e && e.code;
           const m = (e && e.message) || '';
-          if (c === 'need_login') return '网盘登录已失效：请重新复制 ' + (tr.value.cap.cookie_key || 'Cookie') + ' 后再试';
+          if (c === 'need_login') {
+            return credReady(tr.value.kind)
+              ? '本站配置的网盘 Cookie 已失效，可填入自己的 Cookie 重试，或联系站长更新'
+              : '网盘登录已失效：请重新复制 ' + (tr.value.cap.cookie_key || 'Cookie') + ' 后再试';
+          }
           if (c === 'wrong_password') return '提取码不正确，请检查后重试';
           if (c === 'share_cancelled' || c === 'share_not_found') return m || '分享已失效';
           if (c === 'disabled') return '站长未开放转存功能';
@@ -840,10 +896,97 @@ ${CLOUD_BADGE_CSS}
             title: item.note || item.title || '',
             remember: true
           });
-          // 夸克 / UC 可匿名解析；百度必须先有 Cookie 才能列目录
-          if (cred || cap.anonymous_preview) doPreview();
+          // 夸克 / UC 可匿名解析；百度必须先有 Cookie（自己填的或后台配置的）才能列目录
+          if (cred || cap.anonymous_preview || credReady(kind)) doPreview();
         };
         const closeTransfer = () => { tr.value.open = false; };
+
+        /**
+         * V1.6.1 一键下载：点结果卡片的「下载」后自动完成
+         *   解析分享 → 转存到网盘默认目录 → 展开文件夹 → 取直链开始下载
+         * 全程只发一个 /api/transfer/fetch 请求，进度用计时器做视觉反馈。
+         */
+        let autoTimer = null;
+        const stopAutoTimer = () => {
+          if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+        };
+        const quickDownload = (item) => {
+          const kind = item.cloudType;
+          const cap = transferCaps.value[kind] || {};
+          tr.value = Object.assign(emptyTr(), {
+            open: true, kind, cap,
+            cred: loadLocal(credKey(kind)),
+            dir: loadLocal(dirKey(kind)) || cap.default_dir || '/',
+            url: item.url, pwd: item.password || '',
+            title: item.note || item.title || '',
+            quick: true, step: 'auto', stage: '正在解析分享…'
+          });
+          doAuto();
+        };
+
+        const doAuto = async () => {
+          const t = tr.value;
+          if (t.busy) return;
+          t.busy = true;
+          t.error = '';
+          t.quick = true;
+          t.step = 'auto';
+          t.progress = 8;
+          t.elapsed = 0;
+          t.stage = '正在解析分享…';
+          stopAutoTimer();
+          const startedAt = Date.now();
+          autoTimer = setInterval(() => {
+            const sec = Math.floor((Date.now() - startedAt) / 1000);
+            t.elapsed = sec;
+            t.progress = Math.min(92, 8 + sec * 4);
+            t.stage =
+              sec < 3 ? '正在解析分享…'
+              : sec < 9 ? '正在转存到网盘目录…'
+              : sec < 18 ? '正在确认文件…'
+              : '正在准备下载…';
+          }, 1000);
+          try {
+            const r = await transferApi('fetch', {
+              url: t.url, password: t.pwd, type: t.kind,
+              credential: t.cred.trim(), to_path: t.dir
+            });
+            if (r.need_password) {
+              stopAutoTimer();
+              t.step = 'cred';
+              t.needPwd = true;
+              t.error = '该分享需要提取码，请填写后重试';
+              return;
+            }
+            absorbCred(r);
+            const files = (r.files || []).map(f => ({
+              id: f.id, name: f.name, path: f.path || '', size: f.size || 0, is_dir: false
+            }));
+            t.saved = files;
+            t.savedPath = r.path || normDir(t.dir);
+            t.pending = !!r.task_pending;
+            t.truncated = !!r.truncated;
+            if (t.remember && t.savedPath) saveLocal(dirKey(t.kind), t.savedPath);
+            stopAutoTimer();
+            t.progress = 100;
+            t.elapsed = Math.floor((Date.now() - startedAt) / 1000);
+            t.step = 'done';
+            if (files.length === 1) {
+              await startDownload(files[0]);
+              showToast('已开始下载：' + files[0].name, 'ok');
+            } else {
+              // 多个文件：先自动下前 3 个（浏览器可能拦截多文件下载），其余留给用户点
+              showToast('已转存 ' + files.length + ' 个文件，正在依次下载', 'ok');
+              downloadAll(3);
+            }
+          } catch (e) {
+            stopAutoTimer();
+            t.step = 'cred';
+            t.error = trFriendly(e);
+          } finally {
+            t.busy = false;
+          }
+        };
 
         const doPreview = async () => {
           const t = tr.value;
@@ -926,38 +1069,69 @@ ${CLOUD_BADGE_CSS}
         };
 
         /**
-         * 下载：先用 link 接口校验（拿不到文件名/大小就说明 Cookie 失效或文件不存在），
+         * 真正触发一次浏览器下载：先 link 校验（拿不到文件名/大小说明 Cookie 失效或文件不存在），
          * 再用隐藏表单 POST 到 iframe，交给浏览器原生下载（大文件不占内存，PWA 全屏也兼容）。
          */
+        const startDownload = async (it) => {
+          const t = tr.value;
+          await transferApi('link', {
+            type: t.kind, credential: t.cred.trim(), id: it.id, path: it.path || ''
+          });
+          const form = document.createElement('form');
+          form.method = 'POST';
+          form.action = '/api/transfer/download';
+          form.target = 'tr-dl-frame';
+          form.style.display = 'none';
+          const fields = { kind: t.kind, credential: t.cred.trim(), id: it.id, path: it.path || '' };
+          if (feToken.value) fields.token = feToken.value;
+          Object.keys(fields).forEach(k => {
+            const el = document.createElement('input');
+            el.type = 'hidden';
+            el.name = k;
+            el.value = fields[k];
+            form.appendChild(el);
+          });
+          document.body.appendChild(form);
+          form.submit();
+          setTimeout(() => {
+            try { document.body.removeChild(form); } catch (e) {}
+          }, 1000);
+        };
+
         const downloadItem = async (it) => {
           const t = tr.value;
           if (t.dlId) return;
           t.dlId = it.id;
           t.error = '';
           try {
-            await transferApi('link', { type: t.kind, credential: t.cred.trim(), id: it.id, path: it.path || '' });
-            const form = document.createElement('form');
-            form.method = 'POST';
-            form.action = '/api/transfer/download';
-            form.target = 'tr-dl-frame';
-            form.style.display = 'none';
-            const fields = { kind: t.kind, credential: t.cred.trim(), id: it.id, path: it.path || '' };
-            if (feToken.value) fields.token = feToken.value;
-            Object.keys(fields).forEach(k => {
-              const el = document.createElement('input');
-              el.type = 'hidden';
-              el.name = k;
-              el.value = fields[k];
-              form.appendChild(el);
-            });
-            document.body.appendChild(form);
-            form.submit();
-            setTimeout(() => { document.body.removeChild(form); }, 1000);
+            await startDownload(it);
             showToast('已开始下载：' + it.name);
           } catch (e) {
             t.error = trFriendly(e);
           } finally {
             setTimeout(() => { tr.value.dlId = ''; }, 1500);
+          }
+        };
+
+        /** 依次下载多个文件；max 限制自动下载的个数，避免浏览器把多文件下载当弹窗拦掉 */
+        const downloadAll = async (max) => {
+          const t = tr.value;
+          if (t.dlAll) return;
+          const list = downloadable.value.slice(0, max || downloadable.value.length);
+          if (!list.length) return;
+          t.dlAll = true;
+          t.error = '';
+          try {
+            for (const it of list) {
+              await startDownload(it);
+              // 每个文件之间留一点间隔，浏览器才不会把后面的都拦掉
+              await new Promise(r => setTimeout(r, 1200));
+            }
+            showToast('已开始下载 ' + list.length + ' 个文件', 'ok');
+          } catch (e) {
+            t.error = trFriendly(e);
+          } finally {
+            t.dlAll = false;
           }
         };
         // iframe 里的下载失败时，Worker 回一段 HTML 向父窗口 postMessage
@@ -1373,6 +1547,10 @@ ${CLOUD_BADGE_CSS}
               const caps = {};
               (cfg.transfer_caps || []).forEach(c => { caps[c.key] = c; });
               transferCaps.value = caps;
+              // V1.6.1：哪些网盘已有站长配置好的 Cookie（只拿到布尔值）
+              transferReady.value = cfg.transfer_cred_ready && typeof cfg.transfer_cred_ready === 'object'
+                ? cfg.transfer_cred_ready
+                : {};
             }
           } catch (e) {}
 
@@ -1451,11 +1629,17 @@ ${CLOUD_BADGE_CSS}
           toast,
           transferEnabled,
           transferCaps,
+          transferReady,
+          credReady,
           cookieHint,
           allSelected,
+          downloadable,
           canTransfer,
           openTransfer,
           closeTransfer,
+          quickDownload,
+          doAuto,
+          downloadAll,
           doPreview,
           doSave,
           toggleAllItems,

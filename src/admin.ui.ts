@@ -259,9 +259,39 @@ const API_GROUPS_JSON = JSON.stringify([
       },
       {
         method: 'POST',
+        path: '/api/transfer/fetch',
+        summary: 'V1.6.1 一键下载：解析 → 转存 → 展开目录 → 返回可下载文件',
+        desc:
+          '按「分享链接 → 全部转存到默认目录 → 递归展开文件夹」一次做完，前端拿到 files 后直接调 /api/transfer/download 即可。' +
+          '未传 credential 时使用后台「网盘 Cookie」里配置的那份，因此访客无需登录网盘；' +
+          '文件数上限 60、目录层级 3，超出时 truncated 为 true。',
+        req:
+          'Body: { "url": "分享链接", "password": "提取码(可选)", "to_path": "自定义目录(可选，默认 /来自PanSou)", "credential": "访客自己的 Cookie(可选，优先于后台配置)" }',
+        resp:
+          '{\n' +
+          '  "code": 0,\n' +
+          '  "data": {\n' +
+          '    "kind": "quark", "share_title": "标题", "path": "/来自PanSou/标题",\n' +
+          '    "files": [ { "id": "fid", "name": "文件.mkv", "path": "/来自PanSou/标题/文件.mkv", "size": 123456789 } ],\n' +
+          '    "truncated": false, "skipped": 0, "task_pending": false\n' +
+          '  }\n' +
+          '}\n' +
+          '// 缺提取码时 data.need_password = true，补 password 后再调一次'
+      },
+      {
+        method: 'POST',
+        path: '/api/transfer/check',
+        summary: 'V1.6.1 验证网盘 Cookie 是否有效（仅后台）',
+        desc:
+          '用后台配置的 Cookie（或请求体里传的）列一次根目录，能列出来就说明 Cookie 还在有效期内。需 Authorization: Bearer <后台密码>。',
+        req: 'Body: { "kind": "quark" } 或 { "kind": "baidu", "credential": "临时验证的 Cookie" }',
+        resp: '{ "code": 0, "data": { "kind": "quark", "ok": true, "count": 12, "message": "Cookie 有效" } }'
+      },
+      {
+        method: 'POST',
         path: '/api/transfer/list',
         summary: '列自己网盘的目录（选目录 / 验证 Cookie）',
-        req: 'Body: { "kind": "quark", "credential": "网盘 Cookie", "path": "/" }',
+        req: 'Body: { "kind": "quark", "credential": "网盘 Cookie(可省略，用后台配置)", "path": "/" }',
         resp: '{ "code": 0, "data": { "path": "/", "entries": [ { "id": "fid", "name": "目录", "is_dir": true, "size": 0 } ] } }'
       },
       {
@@ -942,9 +972,9 @@ ${CLOUD_BADGE_CSS}
                 <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">V1.6</span>
               </h3>
               <p class="text-[11px] text-slate-500 mt-1 leading-relaxed">
-                开启后，搜索结果卡片（夸克 / UC / 百度）出现「转存」按钮：访客填入<strong>自己的</strong>网盘 Cookie，
-                即可把分享里的文件转存到自己网盘的指定目录，再由本站代理下载（兼容 PWA）。<br />
-                <span class="text-amber-600">注意：访客的 Cookie 会经过本 Worker 转发给网盘（仅在内存中转发，不写 KV、不记日志）。公开站点请确认接受这一风险后再开启。</span>
+                开启后，搜索结果卡片（夸克 / UC / 百度）出现「下载」与「转存」按钮：
+                点下载会自动把资源转存到你配置的网盘目录，再经本站代理下载（兼容 PWA）。<br />
+                <span class="text-amber-600">注意：网盘 Cookie 会经过本 Worker 转发给网盘（只在内存中转发，不记日志）。公开站点请确认接受这一风险后再开启。</span>
               </p>
             </div>
             <button
@@ -954,6 +984,60 @@ ${CLOUD_BADGE_CSS}
             >
               <span class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform" :class="settings.transferEnabled ? 'translate-x-5' : 'translate-x-0'"></span>
             </button>
+          </div>
+
+          <!-- V1.6.1：网盘 Cookie（存服务端，访客无需自己登录） -->
+          <div v-if="settings.transferEnabled" class="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <h3 class="font-bold text-sm text-slate-800 flex items-center gap-2">
+                  网盘 Cookie
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">V1.6.1</span>
+                </h3>
+                <p class="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                  填好后，前台结果卡片点「下载」会直接用这个账号转存并下载，访客不必登录网盘；
+                  访客在弹窗里填了自己的 Cookie 时，以访客的为准。Cookie 存在 KV 里，只用于转存 / 下载，绝不下发给访客。
+                </p>
+              </div>
+              <button
+                @click="verifyAllCookies"
+                :disabled="verifyingCookies"
+                class="shrink-0 mt-1 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-[11px] font-medium disabled:opacity-50 flex items-center gap-1"
+              >
+                <i class="fa-solid" :class="verifyingCookies ? 'fa-circle-notch fa-spin' : 'fa-circle-check'"></i>
+                {{ verifyingCookies ? '验证中…' : '验证' }}
+              </button>
+            </div>
+
+            <div v-for="f in transferCookieFields" :key="f.key" class="space-y-1">
+              <div class="flex items-center justify-between gap-2">
+                <label class="text-xs font-semibold text-slate-600">{{ f.label }}</label>
+                <div class="flex items-center gap-2 min-w-0">
+                  <span
+                    v-if="cookieStatus[f.key]"
+                    class="text-[10px] px-1.5 py-0.5 rounded truncate max-w-[180px]"
+                    :class="cookieStatus[f.key].ok ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-600'"
+                    :title="cookieStatus[f.key].text"
+                  >{{ cookieStatus[f.key].text }}</span>
+                  <a :href="f.site" target="_blank" rel="noopener noreferrer" class="text-[11px] text-blue-600 hover:underline shrink-0 flex items-center gap-1">
+                    去获取<i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i>
+                  </a>
+                </div>
+              </div>
+              <textarea
+                v-model="settings.transferCookies[f.key]"
+                rows="2"
+                spellcheck="false"
+                :placeholder="f.placeholder"
+                class="w-full px-3 py-2 text-base font-mono text-xs border-2 border-slate-200 rounded-xl outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+              ></textarea>
+              <p class="text-[10px] text-slate-400 leading-relaxed">{{ f.hint }}</p>
+            </div>
+
+            <p class="text-[10px] text-slate-400 leading-relaxed">
+              填写后请点页面底部「保存配置」才会生效；网盘刷新 Cookie 时本站会自动把新值写回。
+              这些账号的文件会被所有访客下载，请留意网盘容量与风控。
+            </p>
           </div>
         </section>
 
@@ -1222,6 +1306,8 @@ ${CLOUD_BADGE_CSS}
         frontendPasswordMode: 'reuse',
         // V1.6：转存功能默认关闭
         transferEnabled: false,
+        // V1.6.1：服务端网盘 Cookie（夸克 / UC / 百度）
+        transferCookies: { quark: '', uc: '', baidu: '' },
         admin_password_hashed: false,
         admin_password_from_env: false,
         frontend_password_set: false
@@ -1418,6 +1504,14 @@ ${CLOUD_BADGE_CSS}
         if (data.frontendPasswordMode !== 'custom') data.frontendPasswordMode = 'reuse';
         // V1.6：转存开关缺失时视为关闭
         if (typeof data.transferEnabled !== 'boolean') data.transferEnabled = false;
+        // V1.6.1：网盘 Cookie 归一化成三个固定键，避免模板里 v-model 拿到 undefined
+        const ck = data.transferCookies && typeof data.transferCookies === 'object' ? data.transferCookies : {};
+        data.transferCookies = {
+          quark: typeof ck.quark === 'string' ? ck.quark : '',
+          uc: typeof ck.uc === 'string' ? ck.uc : '',
+          baidu: typeof ck.baidu === 'string' ? ck.baidu : ''
+        };
+        cookieStatus.value = {};
 
         const derived = buildPluginSources(data.plugins, data.pluginSourceLabels);
         pluginEndpoint = derived.endpoint;
@@ -1528,7 +1622,13 @@ ${CLOUD_BADGE_CSS}
             showAutoCheck: settings.value.showAutoCheck !== false,
             frontendAuthEnabled: settings.value.frontendAuthEnabled === true,
             frontendPasswordMode: settings.value.frontendPasswordMode || 'reuse',
-            transferEnabled: settings.value.transferEnabled === true
+            transferEnabled: settings.value.transferEnabled === true,
+            // V1.6.1：三个网盘的服务端 Cookie（空串 = 清除该网盘配置）
+            transferCookies: {
+              quark: (settings.value.transferCookies && settings.value.transferCookies.quark) || '',
+              uc: (settings.value.transferCookies && settings.value.transferCookies.uc) || '',
+              baidu: (settings.value.transferCookies && settings.value.transferCookies.baidu) || ''
+            }
           };
           if (newPassword.value.trim()) payload.adminPassword = newPassword.value.trim();
           if (newFrontendPassword.value.trim()) payload.frontendPassword = newFrontendPassword.value.trim();
@@ -1981,6 +2081,9 @@ ${CLOUD_BADGE_CSS}
           settings.value.maxChannelsPerSearch = d.maxChannelsPerSearch || 8;
           // V1.6：转存开关出厂为关，恢复出厂时一并回到关
           if (typeof d.transferEnabled === 'boolean') settings.value.transferEnabled = d.transferEnabled;
+          // V1.6.1：Cookie 属于凭据，恢复出厂即清空（配置文件里本来也不带它们）
+          settings.value.transferCookies = { quark: '', uc: '', baidu: '' };
+          cookieStatus.value = {};
           if (Array.isArray(d.visibleCloudTypes)) settings.value.visibleCloudTypes = d.visibleCloudTypes;
           if (d.resultCacheMode) settings.value.resultCacheMode = d.resultCacheMode;
           // 插件源一并恢复为「内置全开」
@@ -2026,6 +2129,69 @@ ${CLOUD_BADGE_CSS}
         }
       });
 
+      /* ---------------- V1.6.1：服务端网盘 Cookie ----------------
+         存在 KV 里，前台「下载」按钮直接用它转存，访客不用登录网盘。
+         「验证」把输入框里的值直接发给 /api/transfer/check，未保存也能先试。 */
+      const transferCookieFields = [
+        {
+          key: 'quark',
+          label: '夸克网盘',
+          site: 'https://pan.quark.cn',
+          placeholder: '__puus=xxxx（也可直接粘贴整段 Cookie）',
+          hint: '登录 pan.quark.cn → F12 → 应用 / Application → Cookie → 复制 __puus 的值。'
+        },
+        {
+          key: 'uc',
+          label: 'UC 网盘',
+          site: 'https://drive.uc.cn',
+          placeholder: '__puus=xxxx（也可直接粘贴整段 Cookie）',
+          hint: '登录 drive.uc.cn → F12 → 应用 / Application → Cookie → 复制 __puus 的值。'
+        },
+        {
+          key: 'baidu',
+          label: '百度网盘',
+          site: 'https://pan.baidu.com',
+          placeholder: 'BDUSS=xxxx（也可直接粘贴整段 Cookie）',
+          hint: '登录 pan.baidu.com → F12 → 应用 / Application → Cookie → 复制 BDUSS 的值（百度转存必须有 Cookie）。'
+        }
+      ];
+      const cookieStatus = ref({});
+      const verifyingCookies = ref(false);
+
+      const verifyAllCookies = async () => {
+        if (verifyingCookies.value) return;
+        const token = currentToken();
+        if (!token) { showToast('登录状态已失效，请重新登录', 'error'); return; }
+        verifyingCookies.value = true;
+        const next = {};
+        try {
+          for (const f of transferCookieFields) {
+            const v = ((settings.value.transferCookies || {})[f.key] || '').trim();
+            if (!v) continue;
+            try {
+              const res = await fetch('/api/transfer/check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+                body: JSON.stringify({ kind: f.key, credential: v })
+              });
+              const d = await res.json().catch(() => ({}));
+              const r = (d && d.data) || {};
+              next[f.key] = r.ok
+                ? { ok: true, text: '有效（' + (r.count || 0) + ' 项）' }
+                : { ok: false, text: r.message || 'Cookie 已失效' };
+            } catch (e) {
+              next[f.key] = { ok: false, text: '验证失败' };
+            }
+          }
+          cookieStatus.value = next;
+          if (Object.keys(next).length === 0) { showToast('还没有填写任何 Cookie', 'error'); return; }
+          const bad = Object.keys(next).filter(k => !next[k].ok);
+          showToast(bad.length ? (bad.length + ' 个网盘 Cookie 不可用') : '已填的 Cookie 全部有效', bad.length ? 'error' : 'ok');
+        } finally {
+          verifyingCookies.value = false;
+        }
+      };
+
       return {
         authed, loggingIn, loginError, pwdInput, showPwd, login, logout,
         saving, kvBound, activeTab, tabs, settings, toast, dirty,
@@ -2044,6 +2210,8 @@ ${CLOUD_BADGE_CSS}
         passwordHashed, frontendAuthOn, siteOrigin, copyText, apiGroups: API_GROUPS,
         toggleCloud, selectAllClouds, selectMainClouds, moveCloud,
         exportConfig, importConfig, resetToDefaults, save,
+        // V1.6.1：服务端网盘 Cookie
+        transferCookieFields, cookieStatus, verifyingCookies, verifyAllCookies,
         versionLabel, appName
       };
     }

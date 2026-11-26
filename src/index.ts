@@ -42,6 +42,7 @@ import {
   transferLink,
   TransferError
 } from './transfer/index';
+import { collectFiles } from './transfer/collect';
 import { HTML_TEMPLATE } from './ui.html';
 import { ADMIN_TEMPLATE } from './admin.ui';
 import { VUE_JS, TAILWIND_CSS, VENDOR_VERSION } from './vendor.generated';
@@ -263,7 +264,18 @@ export default {
            * 前端据此决定哪些网盘的结果卡片显示「转存」按钮，以及 Cookie 指引文案。
            */
           transfer_enabled: settings.transferEnabled === true,
-          transfer_caps: settings.transferEnabled === true ? TRANSFER_CAPS : []
+          transfer_caps: settings.transferEnabled === true ? TRANSFER_CAPS : [],
+          /**
+           * V1.6.1：哪些网盘已在后台配了站长 Cookie。
+           * 只下发布尔值——Cookie 本身绝不下发给访客。
+           */
+          transfer_cred_ready:
+            settings.transferEnabled === true
+              ? TRANSFER_CAPS.reduce((acc, c) => {
+                  acc[c.key] = !!String((settings.transferCookies || ({} as any))[c.key] || '');
+                  return acc;
+                }, {} as Record<string, boolean>)
+              : {}
         },
         200,
         // 这份配置直接决定「网页端展示哪些网盘」，后台一改就必须立刻可见。
@@ -768,7 +780,12 @@ export default {
                 : current.frontendPasswordMode,
             // V1.6：转存开关
             transferEnabled:
-              typeof body.transferEnabled === 'boolean' ? body.transferEnabled : current.transferEnabled
+              typeof body.transferEnabled === 'boolean' ? body.transferEnabled : current.transferEnabled,
+            // V1.6.1：站长统一配置的网盘 Cookie（只收 quark / uc / baidu 三个键，空串=清除）
+            transferCookies:
+              body.transferCookies && typeof body.transferCookies === 'object'
+                ? mergeTransferCookies(body.transferCookies, current.transferCookies)
+                : current.transferCookies
           };
 
           // 后台密码：立刻哈希后再落盘，明文绝不进 KV
@@ -814,7 +831,9 @@ export default {
         resultCacheMode: defaults.resultCacheMode,
         visibleCloudTypes: defaults.visibleCloudTypes,
         showAutoCheck: defaults.showAutoCheck,
-        transferEnabled: defaults.transferEnabled
+        transferEnabled: defaults.transferEnabled,
+        // V1.6.1：恢复出厂一并清空服务端网盘 Cookie（凭据不属于「可回滚的配置」）
+        transferCookies: defaults.transferCookies
       });
     }
 
@@ -1317,22 +1336,66 @@ async function handleSearch(request: Request, env: Env, ctx: ExecutionContext): 
 }
 
 /**
- * 网盘转存 /api/transfer/*（V1.6）
+ * 网盘转存 /api/transfer/*（V1.6，V1.6.1 增加一键下载）
  * ============
  *   POST /api/transfer/preview    解析分享 → 列出可勾选的文件
  *   POST /api/transfer/save       把选中的条目转存到自己网盘的指定目录
  *   POST /api/transfer/list       列自己网盘的目录（选目录 / 验证 Cookie）
  *   POST /api/transfer/link       取下载直链（只做校验 + 拿文件名/大小，不回传直链本身）
+ *   POST /api/transfer/fetch      V1.6.1 一键：解析 → 转存 → 展开目录 → 回传可下载文件清单
+ *   POST /api/transfer/check      V1.6.1 后台验证 Cookie 是否还有效（仅后台令牌可用）
  *   POST /api/transfer/download   流式转发文件；浏览器用隐藏表单 POST，兼容 PWA standalone
  *
  * 安全模型：
- *   - 功能总开关在后台（transferEnabled），默认关闭；
+ *   - 功能总开关在后台（transferEnabled），默认关闭；`check` 只给后台用，不受开关限制；
  *   - 受前台访问密码保护，隐藏表单无法带自定义头，所以 download 允许从表单字段 `token` 读令牌；
- *   - 网盘 Cookie 只随请求体进、随响应出（凭据轮换时回传新值），不写 KV、不进缓存、不记日志；
+ *   - 网盘 Cookie 优先用站长在后台配置的那份（存 KV），访客自己填了则以访客的为准；
+ *     访客的 Cookie 只在内存里转发，不写 KV、不进缓存、不记日志；
  *   - 所有响应 `Cache-Control: no-store`；download 只透传文件流相关的响应头，Set-Cookie 等一律丢弃。
  */
 const TRANSFER_BODY_LIMIT = 64 * 1024;
 const TRANSFER_TIMEOUT_MS = 30000;
+
+/** 合法的服务端 Cookie 键（与 transfer 驱动一致） */
+const TRANSFER_COOKIE_KEYS = ['quark', 'uc', 'baidu'];
+
+/**
+ * 合并后台提交的网盘 Cookie：
+ * 请求体里出现的键以请求体为准（空串 = 清除），没出现的键保留当前值。
+ * 这样后台「只改夸克」不会把 UC / 百度的配置顺手抹掉。
+ */
+function mergeTransferCookies(patch: any, current: any): Record<string, string> {
+  const out: Record<string, string> = {};
+  const base = current && typeof current === 'object' ? current : {};
+  for (const k of TRANSFER_COOKIE_KEYS) {
+    const v = base[k];
+    if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+  }
+  for (const k of TRANSFER_COOKIE_KEYS) {
+    if (!Object.prototype.hasOwnProperty.call(patch, k)) continue;
+    const v = patch[k];
+    if (typeof v === 'string' && v.trim()) out[k] = v.trim();
+    else delete out[k];
+  }
+  return out;
+}
+
+/**
+ * 递归展开展示目录下的所有文件，得到「可以下载的清单」。
+ * 转存整文件夹时，返回的条目里只有文件夹本身，必须再列一次才知道里面的文件。
+ * 实现放在 transfer/collect.ts，列目录注入成函数，方便离线测边界。
+ */
+async function collectTransferFiles(
+  kind: string,
+  credential: string,
+  basePath: string,
+  entries: any[]
+): Promise<{ files: any[]; truncated: boolean; skipped: number }> {
+  return collectFiles(basePath, entries, async p => {
+    const r = await transferList({ kind, credential, path: p });
+    return { path: r.path, entries: r.entries || [] };
+  });
+}
 
 async function handleTransfer(request: Request, env: Env, path: string): Promise<Response> {
   const noStore = { 'Cache-Control': 'no-store' };
@@ -1364,6 +1427,7 @@ async function handleTransfer(request: Request, env: Env, path: string): Promise
   }
 
   const settings = await getSystemSettings(env);
+  const adminOk = await verifyAdminAuth(request, env);
 
   // 前台门禁：隐藏表单带不了自定义头，允许从表单字段 token 读
   if (isFrontendAuthEnabled(settings)) {
@@ -1373,19 +1437,45 @@ async function handleTransfer(request: Request, env: Env, path: string): Promise
       const expected = await frontendAccessToken(settings, env);
       ok = !!(expected && tokenMatches(token, expected));
     }
-    if (!ok && !(await verifyAdminAuth(request, env))) {
+    if (!ok && !adminOk) {
       return transferErrorResponse(isForm, 'unauthorized', '需要访问密码', 401);
     }
   }
 
-  // 总开关（默认关闭）：关着时任何动作都不执行
-  if (settings.transferEnabled !== true) {
+  // 总开关（默认关闭）：关着时任何动作都不执行。
+  // `check` 是后台验证 Cookie 用的，不受开关限制，但必须带后台令牌。
+  if (action === 'check') {
+    if (!adminOk) {
+      return transferErrorResponse(isForm, 'disabled', '仅站长可验证 Cookie', 403);
+    }
+  } else if (settings.transferEnabled !== true) {
     return transferErrorResponse(isForm, 'disabled', '站长未开放转存功能', 403);
   }
 
   const kind = detectTransferKind(String(body.url || ''), String(body.kind || body.type || ''));
-  const credential = typeof body.credential === 'string' ? body.credential : '';
   const str = (v: any) => (typeof v === 'string' ? v : v == null ? '' : String(v));
+  /**
+   * 凭据来源（V1.6.1）：访客自己填的优先；没填就用站长在后台配置的那份。
+   * `usingStoredCred` 决定「网盘刷新了 Cookie」时要不要回写 KV。
+   */
+  const clientCred = str(body.credential).trim();
+  const storedCred = kind ? str((settings.transferCookies || ({} as any))[kind]).trim() : '';
+  const credential = clientCred || storedCred;
+  const usingStoredCred = !clientCred && !!storedCred;
+
+  /**
+   * 网盘会不定期轮换 Cookie（夸克/UC 的 __puus）。
+   * 用的是站长那份时，把新值写回 KV —— 否则过一阵子后台配的 Cookie 就整体失效了。
+   * 访客自己填的只回传给访客（浏览器 localStorage），服务端不落盘。
+   */
+  const persistRotated = async (r: any) => {
+    if (!usingStoredCred || !r || typeof r.credential !== 'string') return;
+    const next = r.credential.trim();
+    if (!next || next === storedCred) return;
+    const map = { ...(settings.transferCookies || ({} as any)) };
+    map[kind] = next;
+    await saveSystemSettings(env, { transferCookies: map });
+  };
 
   try {
     if (action === 'preview') {
@@ -1393,6 +1483,7 @@ async function handleTransfer(request: Request, env: Env, path: string): Promise
       if (!url) throw new TransferError('bad_request', '缺少分享链接');
       const k = detectTransferKind(url, str(body.type));
       const r = await transferPreview({ kind: k, url, password: str(body.password), credential });
+      await persistRotated(r);
       return jsonResponse({ code: 0, data: r }, 200, noStore);
     }
 
@@ -1410,12 +1501,127 @@ async function handleTransfer(request: Request, env: Env, path: string): Promise
         ids,
         sub_dir: body.sub_dir !== false
       });
+      await persistRotated(r);
       return jsonResponse({ code: 0, data: r }, 200, noStore);
+    }
+
+    /**
+     * V1.6.1 一键下载：解析分享 → 全部转存到默认目录 → 递归展开文件夹 → 回传可下载文件清单。
+     * 前端拿到 files 后直接走 download 流式下载，用户只需点一次。
+     */
+    if (action === 'fetch') {
+      const url = str(body.url).trim();
+      if (!url) throw new TransferError('bad_request', '缺少分享链接');
+      if (!kind) throw new TransferError('not_supported', '该网盘暂不支持转存');
+
+      const password = str(body.password);
+      const pre = await transferPreview({ kind, url, password, credential });
+      // 缺提取码：交回前端补，别继续往下跑（否则转存必然失败）
+      if (pre.need_password) {
+        return jsonResponse(
+          { code: 0, data: { kind, need_password: true, files: [], items: [] } },
+          200,
+          noStore
+        );
+      }
+
+      const cap = TRANSFER_CAPS.find(c => c.key === kind);
+      const toPath = str(body.to_path).trim() || (cap && cap.default_dir) || '/';
+      const saved = await transferSave({
+        kind,
+        url,
+        password,
+        credential,
+        to_path: toPath,
+        ids: [],
+        sub_dir: true
+      });
+      await persistRotated(saved);
+      // 转存过程中 Cookie 可能已被轮换，展开目录要用最新的那份
+      const credAfter = (saved && typeof saved.credential === 'string' && saved.credential) || credential;
+
+      const expanded = await collectTransferFiles(kind, credAfter, saved.path, saved.items || []);
+      if (expanded.files.length === 0) {
+        throw new TransferError(
+          'save_failed',
+          '已转存，但没有找到可下载的文件（分享内容可能全是空文件夹）',
+          502
+        );
+      }
+
+      return jsonResponse(
+        {
+          code: 0,
+          data: {
+            kind,
+            share_title: pre.title || '',
+            path: saved.path,
+            task_pending: !!saved.task_pending,
+            files: expanded.files,
+            truncated: expanded.truncated,
+            skipped: expanded.skipped,
+            ...(saved.credential ? { credential: saved.credential } : {})
+          }
+        },
+        200,
+        noStore
+      );
+    }
+
+    /**
+     * V1.6.1 后台验证 Cookie：拿不到目录就说明 Cookie 已失效。
+     * 不传 credential 时用后台配置的那份，方便直接在后台点「验证」。
+     */
+    if (action === 'check') {
+      const k = str(body.kind || body.type).trim() || kind;
+      if (!k) throw new TransferError('bad_request', '缺少网盘类型');
+      const cred = str(body.credential).trim() || str((settings.transferCookies || ({} as any))[k]).trim();
+      if (!cred) {
+        return jsonResponse(
+          { code: 0, data: { kind: k, ok: false, configured: false, message: '尚未配置 Cookie' } },
+          200,
+          noStore
+        );
+      }
+      try {
+        const r = await transferList({ kind: k, credential: cred, path: '/' });
+        return jsonResponse(
+          {
+            code: 0,
+            data: {
+              kind: k,
+              ok: true,
+              configured: true,
+              path: r.path,
+              count: (r.entries || []).length,
+              message: 'Cookie 有效'
+            }
+          },
+          200,
+          noStore
+        );
+      } catch (e: any) {
+        return jsonResponse(
+          {
+            code: 0,
+            data: {
+              kind: k,
+              ok: false,
+              configured: true,
+              error: e instanceof TransferError ? e.code : 'network_error',
+              message: e instanceof TransferError ? e.message : '无法连接网盘接口'
+            }
+          },
+          200,
+          noStore
+        );
+      }
     }
 
     if (action === 'list') {
       if (!kind) throw new TransferError('not_supported', '该网盘暂不支持转存');
       const r = await transferList({ kind, credential, path: str(body.path) });
+      await persistRotated(r);
       return jsonResponse({ code: 0, data: r }, 200, noStore);
     }
 

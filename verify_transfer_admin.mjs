@@ -100,7 +100,7 @@ try {
 
   await evaluate(`${VM}.activeTab = 'display'`);
   await sleep(400);
-  const hasCard = await evaluate(`document.body.innerText.includes('网盘转存功能') && document.body.innerText.includes('访客的 Cookie 会经过本 Worker 转发')`);
+  const hasCard = await evaluate(`document.body.innerText.includes('网盘转存功能') && document.body.innerText.includes('网盘 Cookie 会经过本 Worker 转发')`);
   check('「结果展示」页出现转存开关卡片与风险提示', hasCard === true);
   check('开关初始为关', (await evaluate(`${VM}.settings.transferEnabled`)) === false);
   await evaluate(`document.body.innerText.includes('网盘转存功能') && ([...document.querySelectorAll('h3')].find(h => h.textContent.includes('网盘转存功能')) || {}).scrollIntoView && [...document.querySelectorAll('h3')].find(h => h.textContent.includes('网盘转存功能')).scrollIntoView({ block: 'center' })`);
@@ -119,12 +119,43 @@ try {
   const uc = await fetch(ORIGIN + '/api/ui-config').then(r => r.json());
   check('前台 ui-config 同步 transfer_enabled=true', uc.transfer_enabled === true && Array.isArray(uc.transfer_caps) && uc.transfer_caps.length === 3);
 
+  // V1.6.1：网盘 Cookie 配置区
+  await evaluate(`${VM}.activeTab = 'display'`);
+  await sleep(300);
+  const cookieCard = await evaluate(`(() => {
+    const btns = [...document.querySelectorAll('button')];
+    const verify = btns.find(b => b.textContent.trim() === '验证');
+    const areas = [...document.querySelectorAll('textarea')];
+    const labels = ['夸克网盘', 'UC 网盘', '百度网盘'].every(n => document.body.innerText.includes(n));
+    const h3 = [...document.querySelectorAll('h3')].find(x => x.textContent.includes('网盘 Cookie'));
+    if (h3) h3.scrollIntoView({ block: 'center' });
+    return { verify: !!verify, areas: areas.length, labels };
+  })()`);
+  check('出现「网盘 Cookie」配置区（三个输入框）', cookieCard.areas === 3 && cookieCard.labels === true, JSON.stringify(cookieCard));
+  check('提供「验证」按钮', cookieCard.verify === true);
+  await sleep(300);
+  await shoot('cookie-empty');
+
+  // 填假 Cookie → 验证按钮应如实报不可用；保存后接口能读到，但前台页面拿不到明文
+  await evaluate(`(() => { const vm = ${VM}; vm.settings.transferCookies.quark = '__puus=ADMIN_TEST_FAKE'; return 'ok'; })()`);
+  await evaluate(`${VM}.verifyAllCookies()`, true);
+  await sleep(500);
+  const badStatus = await evaluate(`JSON.stringify(${VM}.cookieStatus.quark || null)`);
+  check('假 Cookie 验证结果为不可用', /"ok":false/.test(badStatus), badStatus);
+  await evaluate(`${VM}.save()`, true);
+  await sleep(700);
+  const savedCk = await fetch(ORIGIN + '/api/admin/settings', { headers: { Authorization: 'Bearer admin' } }).then(r => r.json());
+  check('保存后后台能读到服务端 Cookie', savedCk.transferCookies && savedCk.transferCookies.quark === '__puus=ADMIN_TEST_FAKE');
+  const ucCk = await fetch(ORIGIN + '/api/ui-config').then(r => r.json());
+  check('ui-config 只下发布尔值（不泄漏 Cookie）', JSON.stringify(ucCk).indexOf('ADMIN_TEST_FAKE') < 0 && ucCk.transfer_cred_ready.quark === true);
+  await shoot('cookie-filled');
+
   // API 文档页
   await evaluate(`${VM}.activeTab = 'api'`);
   await sleep(400);
   const docTxt = await evaluate(`document.body.innerText`);
   check('API 文档页含「网盘转存（V1.6）」分组', docTxt.includes('网盘转存（V1.6，需后台开启）'));
-  check('API 文档页列出 /api/transfer/* 接口', ['/api/transfer/preview', '/api/transfer/save', '/api/transfer/list', '/api/transfer/download'].every(p => docTxt.includes(p)));
+  check('API 文档页列出 /api/transfer/* 接口', ['/api/transfer/preview', '/api/transfer/save', '/api/transfer/fetch', '/api/transfer/check', '/api/transfer/download'].every(p => docTxt.includes(p)));
   await shoot('api');
 
   // 恢复出厂 → 开关回 false（恢复出厂会弹 confirm，headless 下先覆盖掉）

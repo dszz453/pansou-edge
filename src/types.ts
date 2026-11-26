@@ -181,11 +181,26 @@ export interface SystemSettings {
 
   /* ---------------- 网盘转存（V1.6 新增） ---------------- */
   /**
-   * 是否开放「转存到网盘 → 从网盘下载」功能（/api/transfer/* 与前端的「转存」按钮）。
-   * 默认关闭：功能会把访客自己的网盘 Cookie 发给本 Worker 转发，
+   * 是否开放「转存到网盘 → 从网盘下载」功能（/api/transfer/* 与前端的「下载」按钮）。
+   * 默认关闭：功能会把网盘 Cookie 发给本 Worker 转发，
    * 站长确认风险后再开。
    */
   transferEnabled?: boolean;
+  /**
+   * 站长统一配置的各网盘 Cookie（V1.6.1 新增，存 KV）。
+   *
+   * 配置后，前台结果卡片点「下载」会直接用它转存并下载，访客无需自己登录网盘；
+   * 访客在弹窗里填了自己的 Cookie 时，以访客的为准。
+   * 只保存 `quark` / `uc` / `baidu` 三个键，值为完整 Cookie 串或单个 Cookie 值。
+   */
+  transferCookies?: TransferCookieMap;
+}
+
+/** 三个可转存网盘的服务端 Cookie（键名与 transfer 驱动一致） */
+export interface TransferCookieMap {
+  quark?: string;
+  uc?: string;
+  baidu?: string;
 }
 
 export interface Env {
