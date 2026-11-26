@@ -420,6 +420,17 @@ ${CLOUD_BADGE_CSS}
                   <span class="ml-1 hidden sm:inline">测活</span>
                 </button>
 
+                <!-- V1.6：转存到自己网盘（仅后台开启、且该网盘在支持列表内时显示） -->
+                <button
+                  v-if="canTransfer(item.cloudType)"
+                  @click="openTransfer(item)"
+                  class="px-2 py-1 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-lg transition text-[11px] border border-indigo-200/60"
+                  title="转存到自己网盘的指定目录，再从网盘下载"
+                >
+                  <i class="fa-solid fa-cloud-arrow-up text-[10px]"></i>
+                  <span class="ml-1 hidden sm:inline">转存</span>
+                </button>
+
                 <!-- 直达链接 -->
                 <a
                   :href="item.url"
@@ -470,6 +481,202 @@ ${CLOUD_BADGE_CSS}
         </div>
       </div>
     </footer>
+
+    <!-- ============ 转存弹窗（V1.6） ============
+         流程：填网盘 Cookie → 解析分享 → 勾选文件 → 转存到指定目录 → 从网盘下载。
+         Cookie 只存在浏览器 localStorage，随请求发给 Worker 转发，Worker 不落盘。 -->
+    <div
+      v-if="tr.open"
+      class="fixed inset-0 z-[70] flex items-end sm:items-center justify-center bg-slate-900/50 backdrop-blur-sm sm:p-4"
+      @click.self="closeTransfer"
+    >
+      <div class="w-full sm:max-w-lg bg-white rounded-t-2xl sm:rounded-2xl shadow-2xl max-h-[92vh] flex flex-col">
+        <!-- 头部 -->
+        <div class="flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-slate-100">
+          <div class="min-w-0">
+            <h2 class="font-bold text-base text-slate-800 flex items-center gap-2">
+              <i class="fa-solid fa-cloud-arrow-up text-indigo-600"></i>转存到{{ tr.cap.label }}
+            </h2>
+            <p class="text-xs text-slate-400 mt-1 truncate" :title="tr.title || tr.url">{{ tr.title || tr.url }}</p>
+          </div>
+          <button @click="closeTransfer" class="text-slate-400 hover:text-slate-600 tap-target shrink-0" title="关闭">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
+        </div>
+
+        <div class="px-5 py-4 overflow-y-auto space-y-4">
+          <!-- 提取码（分享要求但未带时出现） -->
+          <div v-if="tr.needPwd" class="space-y-1.5">
+            <label class="text-xs font-semibold text-slate-600">提取码</label>
+            <div class="flex gap-2">
+              <input
+                v-model="tr.pwd"
+                @keyup.enter="doPreview"
+                maxlength="12"
+                class="flex-1 px-3 py-2 text-base font-mono tracking-widest border-2 border-amber-300 rounded-xl outline-none focus:border-indigo-500"
+                placeholder="请输入分享提取码"
+              />
+              <button @click="doPreview" :disabled="tr.busy" class="px-3 py-2 bg-amber-50 hover:bg-amber-100 text-amber-700 rounded-xl text-xs font-medium disabled:opacity-50">确定</button>
+            </div>
+          </div>
+
+          <!-- 网盘 Cookie -->
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between">
+              <label class="text-xs font-semibold text-slate-600">{{ tr.cap.credential_label || '网盘 Cookie' }}</label>
+              <a :href="tr.cap.cookie_site" target="_blank" rel="noopener noreferrer" class="text-[11px] text-blue-600 hover:underline flex items-center gap-1">
+                去获取<i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i>
+              </a>
+            </div>
+            <textarea
+              v-model="tr.cred"
+              rows="2"
+              spellcheck="false"
+              :placeholder="'粘贴 ' + (tr.cap.cookie_key || 'Cookie') + ' 的值（也可粘贴整段 Cookie）'"
+              class="w-full px-3 py-2 text-base font-mono text-xs border-2 border-slate-200 rounded-xl outline-none transition focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10"
+            ></textarea>
+            <p class="text-[11px] text-slate-400 leading-relaxed">{{ cookieHint }}</p>
+            <label class="flex items-center gap-2 text-xs text-slate-500 cursor-pointer select-none">
+              <input type="checkbox" v-model="tr.remember" class="w-4 h-4 rounded text-indigo-600 focus:ring-0">
+              记住此 Cookie（仅保存在本机浏览器，服务器不存储）
+            </label>
+          </div>
+
+          <!-- 目标目录 -->
+          <div class="space-y-1.5">
+            <label class="text-xs font-semibold text-slate-600">转存到目录</label>
+            <div class="flex gap-2">
+              <input
+                v-model="tr.dir"
+                class="flex-1 min-w-0 px-3 py-2 text-base font-mono text-xs border-2 border-slate-200 rounded-xl outline-none transition focus:border-indigo-500"
+                placeholder="/来自PanSou"
+              />
+              <button
+                @click="browseDir(tr.dir)"
+                :disabled="tr.busy || !tr.cred.trim()"
+                class="px-3 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 rounded-xl text-xs text-slate-600 font-medium disabled:opacity-50 flex items-center gap-1 shrink-0"
+                title="需要先填写 Cookie 才能浏览自己网盘的目录"
+              >
+                <i class="fa-solid fa-folder-open text-[10px]"></i>浏览
+              </button>
+            </div>
+            <!-- 目录浏览器 -->
+            <div v-if="tr.browseOpen" class="border border-slate-200 rounded-xl overflow-hidden">
+              <div class="flex items-center gap-2 px-3 py-2 bg-slate-50 text-[11px] text-slate-500 border-b border-slate-100">
+                <button @click="browseDir(parentDir(tr.browsePath))" class="hover:text-blue-600 shrink-0">上一级</button>
+                <span class="truncate font-mono">{{ tr.browsePath }}</span>
+                <button @click="pickDir(tr.browsePath)" class="ml-auto text-indigo-600 hover:underline shrink-0">选这里</button>
+              </div>
+              <div class="max-h-44 overflow-y-auto">
+                <div v-if="tr.browseLoading" class="px-3 py-3 text-xs text-slate-400 flex items-center gap-1.5"><i class="fa-solid fa-circle-notch fa-spin"></i>读取中…</div>
+                <div v-else-if="tr.browseEntries.length === 0" class="px-3 py-3 text-xs text-slate-400">此目录下没有子文件夹</div>
+                <button
+                  v-for="e in tr.browseEntries"
+                  :key="e.id"
+                  @click="browseDir(joinDir(tr.browsePath, e.name))"
+                  class="w-full text-left px-3 py-2 text-xs text-slate-700 hover:bg-indigo-50 flex items-center gap-2"
+                >
+                  <i class="fa-solid fa-folder-open text-amber-400 text-[10px]"></i><span class="truncate">{{ e.name }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 错误提示 -->
+          <div v-if="tr.error" class="text-xs text-rose-600 bg-rose-50 border border-rose-100 rounded-lg px-3 py-2 flex items-start gap-1.5">
+            <i class="fa-solid fa-circle-xmark mt-0.5"></i><span>{{ tr.error }}</span>
+          </div>
+
+          <!-- 第二步：分享内容清单 -->
+          <div v-if="tr.step === 'files'" class="space-y-2">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-semibold text-slate-600">分享内容<span class="text-slate-400 font-normal">（{{ tr.items.length }} 项）</span></span>
+              <button @click="toggleAllItems" class="text-blue-600 hover:underline">{{ allSelected ? '全不选' : '全选' }}</button>
+            </div>
+            <div class="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-56 overflow-y-auto">
+              <label v-for="it in tr.items" :key="it.id" class="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                <input type="checkbox" :value="it.id" v-model="tr.selected" class="w-4 h-4 rounded text-indigo-600 focus:ring-0 shrink-0">
+                <i class="fa-solid text-[11px] shrink-0" :class="it.is_dir ? 'fa-folder-open text-amber-400' : 'fa-file-import text-slate-300'"></i>
+                <span class="flex-1 min-w-0 text-xs text-slate-700 truncate" :title="it.name">{{ it.name }}</span>
+                <span class="text-[10px] text-slate-400 shrink-0">{{ it.is_dir ? '文件夹' : sizeLabel(it) }}</span>
+              </label>
+            </div>
+          </div>
+
+          <!-- 第三步：转存结果 -->
+          <div v-if="tr.step === 'done'" class="space-y-2">
+            <div class="text-xs text-emerald-700 bg-emerald-50 border border-emerald-100 rounded-lg px-3 py-2 flex items-start gap-1.5">
+              <i class="fa-solid fa-circle-check mt-0.5"></i>
+              <span>已转存 {{ tr.saved.length }} 项到 <span class="font-mono break-all">{{ tr.savedPath }}</span></span>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <a :href="tr.cap.web_url" target="_blank" rel="noopener noreferrer" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium flex items-center gap-1">
+                去网盘查看<i class="fa-solid fa-arrow-up-right-from-square text-[9px]"></i>
+              </a>
+              <button @click="copyText(tr.savedPath, '目录路径已复制')" class="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-medium flex items-center gap-1">
+                <i class="fa-solid fa-copy text-[10px]"></i>复制路径
+              </button>
+            </div>
+            <div class="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-56 overflow-y-auto">
+              <div v-for="it in tr.saved" :key="it.id" class="flex items-center gap-2.5 px-3 py-2">
+                <i class="fa-solid text-[11px] shrink-0" :class="it.is_dir ? 'fa-folder-open text-amber-400' : 'fa-file-import text-slate-300'"></i>
+                <span class="flex-1 min-w-0 text-xs text-slate-700 truncate" :title="it.name">{{ it.name }}</span>
+                <span v-if="!it.is_dir" class="text-[10px] text-slate-400 shrink-0">{{ sizeLabel(it) }}</span>
+                <button
+                  v-if="!it.is_dir"
+                  @click="downloadItem(it)"
+                  :disabled="tr.dlId === it.id"
+                  class="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-[11px] font-medium disabled:opacity-60 flex items-center gap-1 shrink-0"
+                >
+                  <i class="fa-solid text-[10px]" :class="tr.dlId === it.id ? 'fa-circle-notch fa-spin' : 'fa-download'"></i>{{ tr.dlId === it.id ? '准备中…' : '下载' }}
+                </button>
+              </div>
+            </div>
+            <p v-if="tr.pending" class="text-[11px] text-amber-600 leading-relaxed">网盘仍在后台处理部分文件，若下载报错请稍等片刻后再点下载。</p>
+            <p class="text-[11px] text-slate-400 leading-relaxed">下载由本站代理转发，大文件会显示为浏览器下载任务；PWA 全屏模式下同样可用。</p>
+          </div>
+        </div>
+
+        <!-- 底部操作 -->
+        <div class="px-5 py-3 border-t border-slate-100 flex items-center gap-2 safe-bottom">
+          <template v-if="tr.step === 'cred'">
+            <button
+              @click="doPreview"
+              :disabled="tr.busy || (!tr.cred.trim() && !tr.cap.anonymous_preview)"
+              class="flex-1 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-semibold text-sm rounded-xl transition shadow-md shadow-indigo-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              <i class="fa-solid" :class="tr.busy ? 'fa-circle-notch fa-spin' : 'fa-magnifying-glass'"></i>
+              <span>{{ tr.busy ? '解析中…' : '解析分享' }}</span>
+            </button>
+          </template>
+          <template v-else-if="tr.step === 'files'">
+            <button @click="tr.step = 'cred'" :disabled="tr.busy" class="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-medium disabled:opacity-50">上一步</button>
+            <button
+              @click="doSave"
+              :disabled="tr.busy || tr.selected.length === 0 || !tr.cred.trim()"
+              class="flex-1 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white font-semibold text-sm rounded-xl transition shadow-md shadow-indigo-500/20 disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              <i class="fa-solid" :class="tr.busy ? 'fa-circle-notch fa-spin' : 'fa-cloud-arrow-up'"></i>
+              <span>{{ tr.busy ? '转存中…' : '转存 ' + tr.selected.length + ' 项' }}</span>
+            </button>
+          </template>
+          <template v-else>
+            <button @click="closeTransfer" class="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-sm font-medium">完成</button>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- 下载用隐藏 iframe：表单 POST 走浏览器原生下载，大文件不占内存，PWA standalone 也兼容 -->
+    <iframe name="tr-dl-frame" src="about:blank" style="display:none" title="download"></iframe>
+
+    <!-- 全局轻提示 -->
+    <div
+      v-if="toast.show"
+      class="fixed left-1/2 -translate-x-1/2 z-[80] px-4 py-2.5 rounded-xl shadow-lg text-xs font-medium max-w-[90vw] text-white"
+      :class="toast.type === 'error' ? 'bg-rose-600' : toast.type === 'ok' ? 'bg-emerald-600' : 'bg-slate-800'"
+      style="bottom: calc(24px + var(--safe-bottom))"
+    >{{ toast.msg }}</div>
 
 
   </div>
@@ -522,6 +729,245 @@ ${CLOUD_BADGE_CSS}
         const cloudFilterActive = ref(false);
         // 网盘中文名映射（由后台下发，前端不再硬编码）
         const cloudLabels = ref({});
+
+        /* ---------------- 网盘转存（V1.6） ----------------
+           凭据（网盘 Cookie）只存浏览器 localStorage，随请求体发给 Worker 转发；
+           Worker 不落盘。网盘轮换凭据时会把新值带回来，这里顺手覆盖本地旧值。 */
+        const transferEnabled = ref(false);
+        const transferCaps = ref({});
+        const BS = String.fromCharCode(92);
+        const normDir = (p) => {
+          const segs = [];
+          String(p || '').trim().split(BS).join('/').split('/').forEach(x => {
+            x = x.trim();
+            if (x && x !== '.') segs.push(x);
+          });
+          return '/' + segs.join('/');
+        };
+        const joinDir = (base, name) => normDir(base + '/' + name);
+        const parentDir = (p) => {
+          const segs = normDir(p).split('/').filter(Boolean);
+          segs.pop();
+          return '/' + segs.join('/');
+        };
+        const fmtSize = (n) => {
+          n = Number(n) || 0;
+          if (n < 1024) return n + ' B';
+          const units = ['KB', 'MB', 'GB', 'TB'];
+          let i = -1;
+          do { n /= 1024; i++; } while (n >= 1024 && i < units.length - 1);
+          return (n >= 100 ? n.toFixed(0) : n.toFixed(1)) + ' ' + units[i];
+        };
+        // 上游偶尔不带文件大小（返回 0），显示「—」比「0 B」更不容易误解
+        const sizeLabel = (it) => (Number(it && it.size) > 0 ? fmtSize(it.size) : '—');
+        const toast = ref({ show: false, msg: '', type: 'info' });
+        let toastTimer = null;
+        const showToast = (msg, type) => {
+          toast.value = { show: true, msg: String(msg || ''), type: type || 'info' };
+          if (toastTimer) clearTimeout(toastTimer);
+          toastTimer = setTimeout(() => { toast.value.show = false; }, type === 'error' ? 5000 : 2600);
+        };
+        const credKey = (k) => 'pansou_tr_cred_' + k;
+        const dirKey = (k) => 'pansou_tr_dir_' + k;
+        const loadLocal = (k) => { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } };
+        const saveLocal = (k, v) => {
+          try { if (v) localStorage.setItem(k, v); else localStorage.removeItem(k); } catch (e) {}
+        };
+        const COOKIE_HINTS = {
+          quark: '电脑浏览器登录 pan.quark.cn → F12 开发者工具 → 应用/Application → Cookie → 复制 __puus 的值。',
+          uc: '电脑浏览器登录 drive.uc.cn → F12 开发者工具 → 应用/Application → Cookie → 复制 __puus 的值。',
+          baidu: '电脑浏览器登录 pan.baidu.com → F12 → 应用/Application → Cookie → 复制 BDUSS 的值（也可直接粘贴整段 Cookie）。'
+        };
+        const emptyTr = () => ({
+          open: false, step: 'cred', busy: false, error: '', kind: '', cap: {}, url: '', pwd: '',
+          cred: '', remember: true, dir: '/', needPwd: false, title: '',
+          items: [], selected: [], saved: [], savedPath: '', pending: false,
+          browseOpen: false, browsePath: '/', browseEntries: [], browseLoading: false, dlId: ''
+        });
+        const tr = ref(emptyTr());
+        const allSelected = computed(() =>
+          tr.value.items.length > 0 && tr.value.selected.length === tr.value.items.length
+        );
+        const canTransfer = (type) => !!(transferEnabled.value && type && transferCaps.value[type]);
+        const cookieHint = computed(() => COOKIE_HINTS[tr.value.kind] || '从网盘网页版的开发者工具中复制登录 Cookie 后粘贴到此处。');
+
+        // 不走通用的 apiFetch：那个把任何 401 都当成「前台密码失效」并锁屏，
+        // 而转存接口的 401 还可能是「网盘 Cookie 失效」，这里按 error 字段区分。
+        const transferApi = async (action, body) => {
+          const headers = { 'Content-Type': 'application/json' };
+          if (feToken.value) headers['X-Frontend-Token'] = feToken.value;
+          const res = await fetch('/api/transfer/' + action, { method: 'POST', headers, body: JSON.stringify(body) });
+          const d = await res.json().catch(() => ({}));
+          if (d.error === 'unauthorized') {
+            feToken.value = '';
+            try { localStorage.removeItem(FE_TOKEN_KEY); } catch (e) {}
+            locked.value = true;
+            throw { code: 'unauthorized', message: '需要访问密码，请先解锁' };
+          }
+          if (!res.ok || d.code !== 0) {
+            throw { code: d.error || 'error', message: d.message || ('请求失败（HTTP ' + res.status + '）') };
+          }
+          return d.data || {};
+        };
+        const trFriendly = (e) => {
+          const c = e && e.code;
+          const m = (e && e.message) || '';
+          if (c === 'need_login') return '网盘登录已失效：请重新复制 ' + (tr.value.cap.cookie_key || 'Cookie') + ' 后再试';
+          if (c === 'wrong_password') return '提取码不正确，请检查后重试';
+          if (c === 'share_cancelled' || c === 'share_not_found') return m || '分享已失效';
+          if (c === 'disabled') return '站长未开放转存功能';
+          if (c === 'not_supported') return m || '该网盘暂不支持转存';
+          if (c === 'network_error') return (m || '无法连接网盘接口') + '，请稍后重试';
+          if (c === 'unauthorized') return m;
+          return m || '操作失败，请稍后重试';
+        };
+        // 网盘轮换了凭据 → 回写输入框与本地
+        const absorbCred = (r) => {
+          if (r && r.credential) {
+            tr.value.cred = r.credential;
+            if (tr.value.remember) saveLocal(credKey(tr.value.kind), r.credential);
+          }
+        };
+
+        const openTransfer = (item) => {
+          const kind = item.cloudType;
+          const cap = transferCaps.value[kind] || {};
+          const dir = loadLocal(dirKey(kind)) || cap.default_dir || '/';
+          const cred = loadLocal(credKey(kind));
+          tr.value = Object.assign(emptyTr(), {
+            open: true, kind, cap, dir, cred,
+            url: item.url, pwd: item.password || '',
+            title: item.note || item.title || '',
+            remember: true
+          });
+          // 夸克 / UC 可匿名解析；百度必须先有 Cookie 才能列目录
+          if (cred || cap.anonymous_preview) doPreview();
+        };
+        const closeTransfer = () => { tr.value.open = false; };
+
+        const doPreview = async () => {
+          const t = tr.value;
+          if (t.busy) return;
+          t.busy = true;
+          t.error = '';
+          try {
+            const r = await transferApi('preview', {
+              url: t.url, password: t.pwd, type: t.kind, credential: t.cred.trim()
+            });
+            absorbCred(r);
+            if (r.need_password) { t.needPwd = true; return; }
+            t.needPwd = false;
+            if (r.title) t.title = r.title;
+            t.items = r.items || [];
+            t.selected = t.items.map(x => x.id);
+            if (t.remember) saveLocal(credKey(t.kind), t.cred.trim());
+            if (t.items.length === 0) { t.error = '分享里没有可转存的内容（可能已被分享者清空）'; return; }
+            t.step = 'files';
+          } catch (e) {
+            t.error = trFriendly(e);
+          } finally {
+            t.busy = false;
+          }
+        };
+
+        const toggleAllItems = () => {
+          const t = tr.value;
+          t.selected = allSelected.value ? [] : t.items.map(x => x.id);
+        };
+
+        const doSave = async () => {
+          const t = tr.value;
+          if (t.busy || t.selected.length === 0) return;
+          t.busy = true;
+          t.error = '';
+          const dir = normDir(t.dir);
+          t.dir = dir;
+          try {
+            const r = await transferApi('save', {
+              url: t.url, password: t.pwd, type: t.kind, credential: t.cred.trim(),
+              to_path: dir, ids: t.selected
+            });
+            absorbCred(r);
+            if (t.remember) saveLocal(dirKey(t.kind), dir);
+            t.saved = r.items || [];
+            t.savedPath = r.path || dir;
+            t.pending = !!r.task_pending;
+            t.step = 'done';
+            showToast('已转存 ' + t.saved.length + ' 项到 ' + t.savedPath, 'ok');
+          } catch (e) {
+            t.error = trFriendly(e);
+          } finally {
+            t.busy = false;
+          }
+        };
+
+        const browseDir = async (p) => {
+          const t = tr.value;
+          const target = normDir(p);
+          t.browseOpen = true;
+          t.browseLoading = true;
+          t.browsePath = target;
+          try {
+            const r = await transferApi('list', { type: t.kind, credential: t.cred.trim(), path: target });
+            absorbCred(r);
+            t.browsePath = r.path || target;
+            t.browseEntries = (r.entries || []).filter(e => e.is_dir);
+          } catch (e) {
+            t.browseOpen = false;
+            t.error = trFriendly(e);
+          } finally {
+            t.browseLoading = false;
+          }
+        };
+        const pickDir = (p) => {
+          tr.value.dir = p;
+          tr.value.browseOpen = false;
+          saveLocal(dirKey(tr.value.kind), p);
+        };
+
+        /**
+         * 下载：先用 link 接口校验（拿不到文件名/大小就说明 Cookie 失效或文件不存在），
+         * 再用隐藏表单 POST 到 iframe，交给浏览器原生下载（大文件不占内存，PWA 全屏也兼容）。
+         */
+        const downloadItem = async (it) => {
+          const t = tr.value;
+          if (t.dlId) return;
+          t.dlId = it.id;
+          t.error = '';
+          try {
+            await transferApi('link', { type: t.kind, credential: t.cred.trim(), id: it.id, path: it.path || '' });
+            const form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '/api/transfer/download';
+            form.target = 'tr-dl-frame';
+            form.style.display = 'none';
+            const fields = { kind: t.kind, credential: t.cred.trim(), id: it.id, path: it.path || '' };
+            if (feToken.value) fields.token = feToken.value;
+            Object.keys(fields).forEach(k => {
+              const el = document.createElement('input');
+              el.type = 'hidden';
+              el.name = k;
+              el.value = fields[k];
+              form.appendChild(el);
+            });
+            document.body.appendChild(form);
+            form.submit();
+            setTimeout(() => { document.body.removeChild(form); }, 1000);
+            showToast('已开始下载：' + it.name);
+          } catch (e) {
+            t.error = trFriendly(e);
+          } finally {
+            setTimeout(() => { tr.value.dlId = ''; }, 1500);
+          }
+        };
+        // iframe 里的下载失败时，Worker 回一段 HTML 向父窗口 postMessage
+        window.addEventListener('message', (ev) => {
+          const d = ev && ev.data;
+          if (d && d.type === 'transfer-download-error') {
+            if (d.error === 'unauthorized') { showToast('需要访问密码，请先解锁', 'error'); return; }
+            showToast('下载失败：' + (d.message || '未知错误'), 'error');
+          }
+        });
 
         /* ---------------- PWA 安装 ---------------- */
         const canInstall = ref(false);
@@ -922,6 +1368,11 @@ ${CLOUD_BADGE_CSS}
               } else {
                 locked.value = false;
               }
+              // V1.6：转存功能（后台开启时下发能力表）
+              transferEnabled.value = cfg.transfer_enabled === true && Array.isArray(cfg.transfer_caps);
+              const caps = {};
+              (cfg.transfer_caps || []).forEach(c => { caps[c.key] = c; });
+              transferCaps.value = caps;
             }
           } catch (e) {}
 
@@ -994,7 +1445,27 @@ ${CLOUD_BADGE_CSS}
           unlockError,
           unlocking,
           showUnlockPwd,
-          unlock
+          unlock,
+          // V1.6：网盘转存
+          tr,
+          toast,
+          transferEnabled,
+          transferCaps,
+          cookieHint,
+          allSelected,
+          canTransfer,
+          openTransfer,
+          closeTransfer,
+          doPreview,
+          doSave,
+          toggleAllItems,
+          browseDir,
+          pickDir,
+          downloadItem,
+          joinDir,
+          parentDir,
+          fmtSize,
+          sizeLabel
         };
       }
     });

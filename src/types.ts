@@ -178,6 +178,14 @@ export interface SystemSettings {
   frontendPasswordMode?: FrontendPasswordMode;
   /** 前台独立密码的 PBKDF2 哈希（仅 `frontendPasswordMode = 'custom'` 时生效） */
   frontendPasswordHash?: string;
+
+  /* ---------------- 网盘转存（V1.6 新增） ---------------- */
+  /**
+   * 是否开放「转存到网盘 → 从网盘下载」功能（/api/transfer/* 与前端的「转存」按钮）。
+   * 默认关闭：功能会把访客自己的网盘 Cookie 发给本 Worker 转发，
+   * 站长确认风险后再开。
+   */
+  transferEnabled?: boolean;
 }
 
 export interface Env {

@@ -24,6 +24,25 @@
 
 ---
 
+## 🆕 V1.6 更新要点：搜索结果一键「转存到自己网盘 → 从网盘下载」
+
+搜索出来的资源，点「转存」→ 填**自己的**网盘 Cookie → 勾选文件 → 选目标目录 → 转存 → 在结果列表里点「下载」。整条链路跑在同一个 Worker 上，网页 / PWA 全屏都能用。网盘协议参照 [OpenListTeam/OpenList-Worker](https://github.com/OpenListTeam/OpenList-Worker) 的驱动实现，转存（分享 → 自己网盘）这一步是其没有的，本期自己补齐。
+
+| # | 项目 | 说明 |
+| :-: | :--- | :--- |
+| 1 | **新增 `src/transfer/` 转存模块** | 驱动注册表 + 统一入口：`preview`（解析分享列文件）/ `save`（转存到目录）/ `list`（列自己网盘目录）/ `link`（取下载直链）。错误统一成 `share_not_found / share_cancelled / share_forbidden / need_password / wrong_password / need_login / dir_failed / save_failed / link_failed …`，前端据此给针对性提示。新增一个网盘 = 写一个驱动 + 注册一行。 |
+| 2 | **夸克 / UC：完整转存 + 下载** | 两者是同族接口，共用一个驱动。匿名解析分享（取 stoken、列文件）；带 `__puus` Cookie 即可建目录、转存、列目录、取直链。实测：单文件分享、单文件夹分享、失效分享、被封分享均正确归类；网盘轮换 `__puus` 时新值会回传，前端自动覆盖本地旧值。 |
+| 3 | **百度：Cookie 走 `verify → transfer`** | 解析页面拿 `shareid / uk`，`verify` 过提取码（匿名可调，已实测），`transfer` 转存、`filemetas + locatedownload` 取直链（需 `BDUSS`，非会员直链受风控影响）。⚠️ 转存与直链两步**没有真实账号可测**，只验证到「无 Cookie → 401」「假 Cookie → 登录失效」「分享已取消」三条路径，真实账号链路请部署后自测。 |
+| 4 | **阿里 / 123 / 115 本期不做（实测结论，不是没空）** | 阿里：分享文件可匿名列出，但取直链三种变体（`alipan` / `aliyundrive` / 加 Referer）均回 **410 空包**，转存需要网页版登录态签名，Workers 里无法稳定复现（OpenList-Worker 也只做只读挂载）。123 / 115：取到的真实样本分享**全部已失效**（5103 / 4100033），没有活链接能验证成功回包，不凭记忆写。 |
+| 5 | **`/api/transfer/*` 五个接口** | `preview` / `save` / `list` / `link` / `download`，全部 POST、全部 `Cache-Control: no-store`。`download` 接受 JSON **或表单**（浏览器隐藏 iframe 表单 POST，兼容 PWA standalone，大文件不占内存），Worker 把上游文件流直接接到响应上，只透传 `Content-Type / Length / Range / ETag` 等文件相关头，`Set-Cookie` 一律丢弃；出错时表单请求回 HTML + `postMessage` 把错误带回父窗口。 |
+| 6 | **安全模型** | ① 后台「结果展示」页新增**转存功能开关，默认关闭**；② 受前台访问密码保护，隐藏表单带不了自定义头，所以允许从表单字段 `token` 读令牌；③ 网盘 Cookie **只随请求体进、随响应出**（凭据轮换时回传新值），不写 KV、不进缓存、不记日志；④ `/api/transfer/link` 不下发直链本身，只回文件名与大小，真正下载时再取一次。 |
+| 7 | **前端转存弹窗** | 结果卡片按 `/api/ui-config` 下发的 `transfer_caps` 决定是否显示「转存」按钮（只有支持的网盘才有）。弹窗：提取码 → Cookie（带每种网盘的获取指引，可勾「记住」仅存本机 localStorage）→ 目标目录（可浏览自己网盘的目录树）→ 文件清单（默认全选 / 全不选）→ 转存结果（逐项「下载」+「去网盘查看」+「复制路径」）。 |
+| 8 | **修一个会把用户登出的坑** | `need_login`（网盘 Cookie 失效）与前台门禁都是 HTTP 401，前端若复用通用 `apiFetch`（任何 401 都清令牌 + 锁屏）会导致**网盘 Cookie 一过期用户就被登出本站**。转存请求改走独立的 `transferApi`，按响应体的 `error` 字段区分。 |
+| 9 | **端到端回归 `verify_transfer_ui.mjs`（20 项）** | 本地真服务 + 真 Chrome：注入模拟结果 → 「转存」按钮只在夸克 / 百度卡片出现（阿里没有）→ 打开弹窗匿名解析**真实夸克分享** → 文件清单默认全选 → 未填 Cookie 时按钮禁用 → 假 Cookie 触发「登录已失效」→ 目录拼接 / 上一级 / 大小格式化 → 移动端 390px 底部弹层无横向溢出 → 无 JS 报错。 |
+| 10 | **版本号 V1.6** | 仍集中在 `src/version.ts`，`package.json` 已同步。 |
+
+---
+
 ## 🆕 V1.4 更新要点
 
 | # | 优化项 | 做法 |
@@ -109,6 +128,7 @@ V1.4 把插件源改成一行一个条目之后，第三方节点的问题暴露
 - 📡 **标准 API 兼容**：完美兼容 `fish2018/pansou` 的 API 标准（GET/POST `/api/search`），可无缝作为影视工具或第三方的搜索后端。
 - 🎨 **现代化响应式 UI**：内置美观的 Vue 3 + TailwindCSS 前端界面，支持分类筛选、一键直达和快速复制。
 - 💾 **KV 配额友好**：搜索结果默认只进 isolate 内存，单次搜索的 KV 写入从 140+ 降到 1，免费额度不再被搜索结果打满。
+- ☁️ **一键转存到自己网盘（V1.6）**：搜索结果卡片点「转存」→ 填自己的夸克 / UC / 百度 Cookie → 勾选文件、选目标目录 → 转存 → 列表内直接下载（Worker 流式转发，PWA 全屏同样可用）。后台开关默认关闭；Cookie 只在浏览器本机保存、经 Worker 内存转发，不落 KV。
 
 ---
 
@@ -133,6 +153,12 @@ V1.4 把插件源改成一行一个条目之后，第三方节点的问题暴露
 │   ├── plugins/
 │   │   ├── index.ts    # 插件引擎入口：按 type 分发到 native / pansou / custom
 │   │   └── native.ts   # 原生源引擎：声明式适配器（JSON POST / 苹果CMS / Flarum），Worker 内直接抓取
+│   ├── transfer/       # V1.6 网盘转存：分享 → 自己网盘指定目录 → 取直链下载
+│   │   ├── index.ts    # 驱动注册表 + 能力表（TRANSFER_CAPS）+ 统一入口 preview/save/list/link
+│   │   ├── quark.ts    # 夸克 / UC 驱动（同族接口）：匿名解析、建目录、转存、列目录、取直链、__puus 轮换
+│   │   ├── baidu.ts    # 百度驱动：页面解析 shareid/uk → verify → transfer → filemetas/locatedownload
+│   │   ├── util.ts     # 带超时/重试的 HTTP 工具、Cookie 解析、目录路径归一化
+│   │   └── types.ts    # ShareItem / PreviewResult / SaveResult / ListResult / LinkResult / TransferError
 │   ├── tailwind-input.css  # Tailwind 入口（预编译为 vendor/tailwind.css）
 │   └── ui.html.ts      # 内置前端 Vue 3 + Tailwind 单页界面
 ├── vendor/             # 同源自托管前端资源（Vue 3 / 预编译 Tailwind）
@@ -146,6 +172,8 @@ V1.4 把插件源改成一行一个条目之后，第三方节点的问题暴露
 ├── verify_native_live.mjs   # 原生源线上验收（真浏览器，断言页面卡片数 / 分类 Tab 计数）
 ├── verify_plugin_compare.mjs # 插件侧产出与 so.252035.xyz 的对照基准（确认不因弃用而掉量）
 ├── verify_display_e2e.mjs   # 「结果展示选网盘」端到端回归（真服务 + 真浏览器 + 后台勾选交互，26 项）
+├── verify_transfer_ui.mjs   # V1.6 转存弹窗端到端回归（真服务 + 真浏览器 + 真实夸克分享匿名解析，20 项）
+├── verify_transfer_admin.mjs # V1.6 后台「网盘转存功能」开关端到端回归（真浏览器：渲染 / 开关 / 保存落盘 / 恢复出厂，10 项）
 ├── verify_v12.mjs           # V1.2 特性回归（PWA / 后台分页 / 网盘白名单 / KV 模式 / 版本，40 项）
 ├── verify_full.mjs          # 143 频道端到端分片搜索验证（BASE=域名 可指定站点）
 ├── verify_plugin_stale.mjs  # 插件过期缓存兜底验证（连续强制刷新看是否会出现空结果）
@@ -311,6 +339,45 @@ node verify_plugin_compare.mjs https://<你的域名> 西游记 庆余年
 `verify_classify_check.mjs` 关注**分类是否准确**（「其他网盘」占比应接近 0）与测活是否可用；`verify_check_matrix.mjs` 用真假链接对照校验判定逻辑，防止误报。
 `verify_check_codes.mjs` 是**离线**回归：把各网盘的真实返回报文喂给 worker（替换 `fetch`），断言状态**和判定通道**都必须正确 —— 光看状态会「蒙对」（历史上 41012 就是靠页面兜底返回 404 蒙对了 invalid），所以必须同时断言 `method === 'api'`。
 `ui_shot.mjs` 用 Chrome DevTools Protocol 把「布局乱不乱」变成可断言数字：输入框高度 ≥40px、按钮不溢出容器/不压住输入框/文字不被裁切、分类栏无横向溢出与裁切。
+
+---
+
+## ☁️ 转存功能（V1.6）
+
+把搜索到的分享**转存到自己网盘的指定目录，再从网盘下载**——不用逐条打开分享页手动点「保存到网盘」。
+
+### 开启
+
+后台 `/admin` → **结果展示** → 「网盘转存功能」开关打开并保存（默认关闭）。开启后 `/api/ui-config` 会下发 `transfer_enabled: true` 与能力表 `transfer_caps`，只有能力表里的网盘才会在结果卡片上显示「转存」按钮。
+
+> ⚠️ **公开站点请先想清楚**：开启后访客的网盘 Cookie 会经过本 Worker 转发给对应网盘（仅在内存中转发，不写 KV、不记日志、响应 `no-store`）。接受这个风险再开。
+
+### 使用（网页 / PWA 相同）
+
+1. 搜索结果卡片上点 **「转存」**（夸克 / UC / 百度卡片才有）。
+2. 粘贴**自己**的网盘 Cookie：
+   | 网盘 | 需要的 Cookie | 获取方式 |
+   | :--- | :--- | :--- |
+   | 夸克 | `__puus` | 电脑浏览器登录 `pan.quark.cn` → F12 → 应用 → Cookie |
+   | UC | `__puus` | 同上，站点为 `drive.uc.cn` |
+   | 百度 | `BDUSS` | 电脑浏览器登录 `pan.baidu.com` → F12 → 应用 → Cookie（也可粘整段 Cookie） |
+
+   可勾「记住此 Cookie」，只存在本机浏览器 `localStorage`，服务器不存储。
+3. 点「解析分享」→ 勾选要转存的文件（默认全选）→ 目标目录默认 `/来自PanSou`，可点「浏览」在自己网盘里选目录（目录不存在会自动逐级创建）。
+4. 点「转存 N 项」→ 完成后在列表里逐项点 **「下载」**，或点「去网盘查看」。夸克 / UC 的 `__puus` 会不定期轮换，轮换后的新值会自动回写本机。
+
+### 支持矩阵与已知限制
+
+| 网盘 | 解析分享 | 转存 | 下载 | 说明 |
+| :--- | :--- | :--- | :--- | :--- |
+| 夸克 | 匿名 | ✅ | ✅ | 已实测解析（单文件 / 文件夹 / 失效 / 被封）与错误码；转存 + 下载链路需真实 Cookie，代码依据 OpenList-Worker 驱动协议 |
+| UC | 匿名 | ✅ | ✅ | 与夸克同族接口，共用驱动 |
+| 百度 | 需 Cookie | ✅ | ✅ | `verify → transfer`；非会员直链受风控影响，大文件可能失败 |
+| 阿里云盘 | — | ❌ | ❌ | 匿名取直链三种变体均回 410，转存需网页版登录态签名，Workers 内无法稳定复现 |
+| 123 / 115 | — | ❌ | ❌ | 样本分享全部失效，无法验证成功回包，暂不凭记忆实现 |
+
+- 下载走 `/api/transfer/download`（隐藏表单 POST 到 iframe），几 GB 的视频也不会占浏览器内存；出错时错误会通过 `postMessage` 回到页面弹提示。
+- 开启了前台访问密码时，转存接口同样需要令牌（`X-Frontend-Token` 或表单字段 `token`）。
 
 ---
 

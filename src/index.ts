@@ -33,6 +33,15 @@ import {
 import { executePluginSearch, effectivePluginIds } from './plugins';
 import { runNativeSource } from './plugins/native';
 import { checkLinkValidity } from './checker';
+import {
+  TRANSFER_CAPS,
+  detectTransferKind,
+  transferPreview,
+  transferSave,
+  transferList,
+  transferLink,
+  TransferError
+} from './transfer/index';
 import { HTML_TEMPLATE } from './ui.html';
 import { ADMIN_TEMPLATE } from './admin.ui';
 import { VUE_JS, TAILWIND_CSS, VENDOR_VERSION } from './vendor.generated';
@@ -248,7 +257,13 @@ export default {
           }, {} as Record<string, string>),
           show_auto_check: settings.showAutoCheck !== false,
           /** V1.3：前台是否开启了访问密码（前端据此决定先弹登录门） */
-          frontend_auth_enabled: isFrontendAuthEnabled(settings)
+          frontend_auth_enabled: isFrontendAuthEnabled(settings),
+          /**
+           * V1.6：转存功能是否开放；开启时把能力表一并下发，
+           * 前端据此决定哪些网盘的结果卡片显示「转存」按钮，以及 Cookie 指引文案。
+           */
+          transfer_enabled: settings.transferEnabled === true,
+          transfer_caps: settings.transferEnabled === true ? TRANSFER_CAPS : []
         },
         200,
         // 这份配置直接决定「网页端展示哪些网盘」，后台一改就必须立刻可见。
@@ -750,7 +765,10 @@ export default {
             frontendPasswordMode:
               body.frontendPasswordMode === 'custom' || body.frontendPasswordMode === 'reuse'
                 ? body.frontendPasswordMode
-                : current.frontendPasswordMode
+                : current.frontendPasswordMode,
+            // V1.6：转存开关
+            transferEnabled:
+              typeof body.transferEnabled === 'boolean' ? body.transferEnabled : current.transferEnabled
           };
 
           // 后台密码：立刻哈希后再落盘，明文绝不进 KV
@@ -795,8 +813,16 @@ export default {
         hotSearches: defaults.hotSearches,
         resultCacheMode: defaults.resultCacheMode,
         visibleCloudTypes: defaults.visibleCloudTypes,
-        showAutoCheck: defaults.showAutoCheck
+        showAutoCheck: defaults.showAutoCheck,
+        transferEnabled: defaults.transferEnabled
       });
+    }
+
+    // 6.5 网盘转存 /api/transfer/*（V1.6）
+    //     搜索结果 → 转存到自己网盘的指定目录 → 从网盘下载。
+    //     凭据（网盘 Cookie）只随请求体往返，Worker 不落 KV、不写日志；响应一律 no-store。
+    if (path.startsWith('/api/transfer/')) {
+      return handleTransfer(request, env, path);
     }
 
     // 7. 核心搜索接口 /api/search 或 /api/panso/search
@@ -1288,6 +1314,218 @@ async function handleSearch(request: Request, env: Env, ctx: ExecutionContext): 
     cache_mode: cacheMode,
     elapsed_ms: Date.now() - startedAt
   });
+}
+
+/**
+ * 网盘转存 /api/transfer/*（V1.6）
+ * ============
+ *   POST /api/transfer/preview    解析分享 → 列出可勾选的文件
+ *   POST /api/transfer/save       把选中的条目转存到自己网盘的指定目录
+ *   POST /api/transfer/list       列自己网盘的目录（选目录 / 验证 Cookie）
+ *   POST /api/transfer/link       取下载直链（只做校验 + 拿文件名/大小，不回传直链本身）
+ *   POST /api/transfer/download   流式转发文件；浏览器用隐藏表单 POST，兼容 PWA standalone
+ *
+ * 安全模型：
+ *   - 功能总开关在后台（transferEnabled），默认关闭；
+ *   - 受前台访问密码保护，隐藏表单无法带自定义头，所以 download 允许从表单字段 `token` 读令牌；
+ *   - 网盘 Cookie 只随请求体进、随响应出（凭据轮换时回传新值），不写 KV、不进缓存、不记日志；
+ *   - 所有响应 `Cache-Control: no-store`；download 只透传文件流相关的响应头，Set-Cookie 等一律丢弃。
+ */
+const TRANSFER_BODY_LIMIT = 64 * 1024;
+const TRANSFER_TIMEOUT_MS = 30000;
+
+async function handleTransfer(request: Request, env: Env, path: string): Promise<Response> {
+  const noStore = { 'Cache-Control': 'no-store' };
+  const action = path.slice('/api/transfer/'.length).replace(/\/+$/, '');
+
+  if (request.method !== 'POST') {
+    return jsonResponse({ code: 405, error: 'bad_request', message: '请使用 POST' }, 405, noStore);
+  }
+
+  // 请求体可以是 JSON（fetch）或表单（隐藏 iframe 下载），统一成对象
+  let body: any = {};
+  // 表单提交（iframe 下载）拿不到 JSON 报错，只能回 HTML + postMessage；JSON 调用方照常回 JSON
+  let isForm = false;
+  try {
+    const len = parseInt(String(request.headers.get('Content-Length') || '0'), 10);
+    if (len > TRANSFER_BODY_LIMIT) {
+      return jsonResponse({ code: 413, error: 'bad_request', message: '请求体过大' }, 413, noStore);
+    }
+    const ct = String(request.headers.get('Content-Type') || '');
+    if (ct.includes('application/x-www-form-urlencoded')) {
+      isForm = true;
+      body = Object.fromEntries(await request.formData());
+    } else {
+      const raw = await request.text();
+      body = raw ? JSON.parse(raw) : {};
+    }
+  } catch (e) {
+    body = {};
+  }
+
+  const settings = await getSystemSettings(env);
+
+  // 前台门禁：隐藏表单带不了自定义头，允许从表单字段 token 读
+  if (isFrontendAuthEnabled(settings)) {
+    const token = String(request.headers.get('X-Frontend-Token') || body.token || '').trim();
+    let ok = false;
+    if (token) {
+      const expected = await frontendAccessToken(settings, env);
+      ok = !!(expected && tokenMatches(token, expected));
+    }
+    if (!ok && !(await verifyAdminAuth(request, env))) {
+      return transferErrorResponse(isForm, 'unauthorized', '需要访问密码', 401);
+    }
+  }
+
+  // 总开关（默认关闭）：关着时任何动作都不执行
+  if (settings.transferEnabled !== true) {
+    return transferErrorResponse(isForm, 'disabled', '站长未开放转存功能', 403);
+  }
+
+  const kind = detectTransferKind(String(body.url || ''), String(body.kind || body.type || ''));
+  const credential = typeof body.credential === 'string' ? body.credential : '';
+  const str = (v: any) => (typeof v === 'string' ? v : v == null ? '' : String(v));
+
+  try {
+    if (action === 'preview') {
+      const url = str(body.url).trim();
+      if (!url) throw new TransferError('bad_request', '缺少分享链接');
+      const k = detectTransferKind(url, str(body.type));
+      const r = await transferPreview({ kind: k, url, password: str(body.password), credential });
+      return jsonResponse({ code: 0, data: r }, 200, noStore);
+    }
+
+    if (action === 'save') {
+      const url = str(body.url).trim();
+      if (!url) throw new TransferError('bad_request', '缺少分享链接');
+      if (!kind) throw new TransferError('not_supported', '该网盘暂不支持转存');
+      const ids = Array.isArray(body.ids) ? body.ids.map(str).filter(Boolean) : [];
+      const r = await transferSave({
+        kind,
+        url,
+        password: str(body.password),
+        credential,
+        to_path: str(body.to_path),
+        ids,
+        sub_dir: body.sub_dir !== false
+      });
+      return jsonResponse({ code: 0, data: r }, 200, noStore);
+    }
+
+    if (action === 'list') {
+      if (!kind) throw new TransferError('not_supported', '该网盘暂不支持转存');
+      const r = await transferList({ kind, credential, path: str(body.path) });
+      return jsonResponse({ code: 0, data: r }, 200, noStore);
+    }
+
+    if (action === 'link') {
+      if (!kind) throw new TransferError('not_supported', '该网盘暂不支持转存');
+      const r = await transferLink({ kind, credential, id: str(body.id), path: str(body.path) });
+      // 直链本身不下发：download 会再取一次；前端只需要文件名与大小
+      return jsonResponse(
+        { code: 0, data: { kind, id: str(body.id), path: str(body.path), name: r.name, size: r.size } },
+        200,
+        noStore
+      );
+    }
+
+    if (action === 'download') {
+      if (!kind) throw new TransferError('not_supported', '该网盘暂不支持转存');
+      const id = str(body.id);
+      const filePath = str(body.path);
+      const r = await transferLink({ kind, credential, id, path: filePath });
+      if (!/^https:\/\//i.test(r.url)) {
+        throw new TransferError('link_failed', '网盘返回的下载地址不合法');
+      }
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), TRANSFER_TIMEOUT_MS);
+      let upstream: Response;
+      try {
+        upstream = await fetch(r.url, {
+          headers: { ...r.headers, Accept: '*/*' },
+          signal: controller.signal,
+          redirect: 'follow'
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+
+      const ct = String(upstream.headers.get('Content-Type') || '');
+      // 网盘风控/登录过期时常回 JSON 而不是文件，这里拦下来别让用户存下一个 .mp4 的报文
+      if (!upstream.ok || !upstream.body || /application\/json|text\/html/i.test(ct)) {
+        const detail = (await upstream.text().catch(() => '')).slice(0, 200);
+        throw new TransferError(
+          'link_failed',
+          `网盘拒绝提供文件（HTTP ${upstream.status}）${detail ? '：' + detail : ''}`,
+          502
+        );
+      }
+
+      const safeName = r.name.replace(/[\u0000-\u001f"\\/]/g, '_').slice(0, 200) || 'download';
+      const asciiName = safeName.replace(/[^\x20-\x7e]/g, '_').replace(/"/g, '_') || 'download';
+      const pass = new Headers();
+      for (const h of [
+        'Content-Type',
+        'Content-Length',
+        'Content-Range',
+        'Accept-Ranges',
+        'Last-Modified',
+        'ETag'
+      ]) {
+        const v = upstream.headers.get(h);
+        if (v) pass.set(h, v);
+      }
+      pass.set('Content-Type', ct || 'application/octet-stream');
+      pass.set(
+        'Content-Disposition',
+        `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`
+      );
+      pass.set('Cache-Control', 'no-store');
+      pass.set('X-Content-Type-Options', 'nosniff');
+      pass.set('Content-Security-Policy', "default-src 'none'; sandbox");
+
+      // 直接把上游流接到响应上：Worker 不缓存整个文件，几 GB 的视频也不会占内存
+      return new Response(upstream.body, { status: 200, headers: pass });
+    }
+
+    return jsonResponse({ code: 404, error: 'bad_request', message: '未知的转存动作' }, 404, noStore);
+  } catch (e: any) {
+    const code = e instanceof TransferError ? e.code : 'network_error';
+    const message =
+      e instanceof TransferError ? e.message : '无法连接网盘接口，请稍后重试';
+    const status = e instanceof TransferError ? e.status : 502;
+    return transferErrorResponse(isForm, code, message, status);
+  }
+}
+
+/**
+ * 转存接口的错误响应。
+ * download 走的是隐藏 iframe，JSON 报错用户看不见，所以回一段 HTML，
+ * 用 postMessage 把错误带回父窗口，由前端弹提示。
+ */
+function transferErrorResponse(isForm: boolean, error: string, message: string, status: number): Response {
+  if (isForm) {
+    const payload = JSON.stringify({ type: 'transfer-download-error', error, message });
+    const html =
+      '<!doctype html><html><head><meta charset="utf-8"><title>下载失败</title></head><body>' +
+      '<p style="font:14px/1.6 sans-serif;padding:16px">下载失败：' +
+      message.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c] as string)) +
+      '</p><script>try{parent.postMessage(' +
+      JSON.stringify(payload).replace(/</g, '\\u003c') +
+      ", '*')}catch(e){}</script></body></html>";
+    return new Response(html, {
+      status,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+      }
+    });
+  }
+  return jsonResponse({ code: status, error, message }, status, { 'Cache-Control': 'no-store' });
 }
 
 /**

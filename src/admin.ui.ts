@@ -221,6 +221,61 @@ const API_GROUPS_JSON = JSON.stringify([
     ]
   },
   {
+    name: '网盘转存（V1.6，需后台开启）',
+    icon: 'fa-cloud-arrow-up',
+    items: [
+      {
+        method: 'POST',
+        path: '/api/transfer/preview',
+        summary: '解析分享链接，列出可转存的文件',
+        desc:
+          '夸克 / UC 可匿名解析；百度需带访问者自己的网盘 Cookie（含 BDUSS）。' +
+          '支持网盘：quark（夸克）、uc（UC）、baidu（百度）。返回的 credential 是网盘轮换后的新凭据，非空时调用方应覆盖本地旧值。',
+        req:
+          'Body: { "url": "https://pan.quark.cn/s/xxxx", "password": "提取码(可选)", "type": "quark(可选，自动识别)", "credential": "网盘 Cookie(百度必填)" }',
+        resp:
+          '{\n' +
+          '  "code": 0,\n' +
+          '  "data": {\n' +
+          '    "kind": "quark", "share_id": "xxxx", "title": "分享标题", "need_password": false,\n' +
+          '    "items": [ { "id": "fid", "name": "文件.mkv", "is_dir": false, "size": 123456789 } ],\n' +
+          '    "credential": "（可选）轮换后的新 Cookie"\n' +
+          '  }\n' +
+          '}\n' +
+          '\n' +
+          '// 失败：HTTP 4xx，{ "code": 400, "error": "share_cancelled", "message": "分享已失效或被取消" }\n' +
+          '// error 取值：disabled / invalid_url / not_supported / share_not_found / share_cancelled / share_forbidden / need_password / wrong_password / need_login / bad_request / network_error'
+      },
+      {
+        method: 'POST',
+        path: '/api/transfer/save',
+        summary: '把分享里的选中条目转存到自己网盘',
+        desc:
+          '需带访问者自己的网盘 Cookie。目标目录不存在时自动逐级创建（默认 /来自PanSou）；ids 为空表示转存全部分享内容。',
+        req:
+          'Body: { "url": "分享链接", "password": "提取码", "credential": "网盘 Cookie", "to_path": "/来自PanSou", "ids": ["fid1", "fid2"], "sub_dir": true }',
+        resp:
+          '{ "code": 0, "data": { "kind": "quark", "path": "/来自PanSou", "items": [ /* 落盘条目，含 id 供下载 */ ], "task_pending": false, "credential": "可选" } }'
+      },
+      {
+        method: 'POST',
+        path: '/api/transfer/list',
+        summary: '列自己网盘的目录（选目录 / 验证 Cookie）',
+        req: 'Body: { "kind": "quark", "credential": "网盘 Cookie", "path": "/" }',
+        resp: '{ "code": 0, "data": { "path": "/", "entries": [ { "id": "fid", "name": "目录", "is_dir": true, "size": 0 } ] } }'
+      },
+      {
+        method: 'POST',
+        path: '/api/transfer/download',
+        summary: '从网盘下载已转存的文件（流式转发）',
+        desc:
+          '接受 JSON 或表单 POST（浏览器隐藏表单用，兼容 PWA standalone）。响应为文件流并带 Content-Disposition: attachment；出错时返回 HTML 并向父窗口 postMessage。',
+        req: 'Body: { "kind": "quark", "credential": "网盘 Cookie", "id": "文件 fid", "path": "百度文件完整路径(百度必填)" }',
+        resp: '成功：200 + 文件流；失败：4xx/5xx + HTML（含 postMessage 错误信息）'
+      }
+    ]
+  },
+  {
     name: '后台管理（需管理员密码）',
     icon: 'fa-sliders',
     items: [
@@ -878,6 +933,28 @@ ${CLOUD_BADGE_CSS}
               <span class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform" :class="settings.showAutoCheck ? 'translate-x-5' : 'translate-x-0'"></span>
             </button>
           </div>
+
+          <!-- V1.6：网盘转存功能开关 -->
+          <div class="bg-white rounded-2xl border border-slate-200 p-4 flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <h3 class="font-bold text-sm text-slate-800 flex items-center gap-2">
+                网盘转存功能
+                <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 font-medium">V1.6</span>
+              </h3>
+              <p class="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                开启后，搜索结果卡片（夸克 / UC / 百度）出现「转存」按钮：访客填入<strong>自己的</strong>网盘 Cookie，
+                即可把分享里的文件转存到自己网盘的指定目录，再由本站代理下载（兼容 PWA）。<br />
+                <span class="text-amber-600">注意：访客的 Cookie 会经过本 Worker 转发给网盘（仅在内存中转发，不写 KV、不记日志）。公开站点请确认接受这一风险后再开启。</span>
+              </p>
+            </div>
+            <button
+              @click="settings.transferEnabled = !settings.transferEnabled"
+              class="relative inline-flex w-11 h-6 shrink-0 rounded-full transition-colors mt-1"
+              :class="settings.transferEnabled ? 'bg-emerald-500' : 'bg-slate-300'"
+            >
+              <span class="absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform" :class="settings.transferEnabled ? 'translate-x-5' : 'translate-x-0'"></span>
+            </button>
+          </div>
         </section>
 
         <!-- ---------------- API 接口（V1.3：从首页挪进后台） ---------------- -->
@@ -1143,6 +1220,8 @@ ${CLOUD_BADGE_CSS}
         // V1.3
         frontendAuthEnabled: false,
         frontendPasswordMode: 'reuse',
+        // V1.6：转存功能默认关闭
+        transferEnabled: false,
         admin_password_hashed: false,
         admin_password_from_env: false,
         frontend_password_set: false
@@ -1337,6 +1416,8 @@ ${CLOUD_BADGE_CSS}
         // V1.3：前台访问密码
         if (typeof data.frontendAuthEnabled !== 'boolean') data.frontendAuthEnabled = false;
         if (data.frontendPasswordMode !== 'custom') data.frontendPasswordMode = 'reuse';
+        // V1.6：转存开关缺失时视为关闭
+        if (typeof data.transferEnabled !== 'boolean') data.transferEnabled = false;
 
         const derived = buildPluginSources(data.plugins, data.pluginSourceLabels);
         pluginEndpoint = derived.endpoint;
@@ -1446,7 +1527,8 @@ ${CLOUD_BADGE_CSS}
             visibleCloudTypes: settings.value.visibleCloudTypes || [],
             showAutoCheck: settings.value.showAutoCheck !== false,
             frontendAuthEnabled: settings.value.frontendAuthEnabled === true,
-            frontendPasswordMode: settings.value.frontendPasswordMode || 'reuse'
+            frontendPasswordMode: settings.value.frontendPasswordMode || 'reuse',
+            transferEnabled: settings.value.transferEnabled === true
           };
           if (newPassword.value.trim()) payload.adminPassword = newPassword.value.trim();
           if (newFrontendPassword.value.trim()) payload.frontendPassword = newFrontendPassword.value.trim();
@@ -1838,7 +1920,8 @@ ${CLOUD_BADGE_CSS}
           visibleCloudTypes: settings.value.visibleCloudTypes,
           showAutoCheck: settings.value.showAutoCheck,
           frontendAuthEnabled: settings.value.frontendAuthEnabled === true,
-          frontendPasswordMode: settings.value.frontendPasswordMode || 'reuse'
+          frontendPasswordMode: settings.value.frontendPasswordMode || 'reuse',
+          transferEnabled: settings.value.transferEnabled === true
         };
         const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
@@ -1874,6 +1957,7 @@ ${CLOUD_BADGE_CSS}
             if (typeof d.resultCacheMode === 'string') settings.value.resultCacheMode = d.resultCacheMode;
             if (Array.isArray(d.visibleCloudTypes)) settings.value.visibleCloudTypes = d.visibleCloudTypes;
             if (typeof d.frontendAuthEnabled === 'boolean') settings.value.frontendAuthEnabled = d.frontendAuthEnabled;
+            if (typeof d.transferEnabled === 'boolean') settings.value.transferEnabled = d.transferEnabled;
             if (d.frontendPasswordMode === 'custom' || d.frontendPasswordMode === 'reuse') {
               settings.value.frontendPasswordMode = d.frontendPasswordMode;
             }
@@ -1895,6 +1979,8 @@ ${CLOUD_BADGE_CSS}
           const d = await res.json();
           settings.value.channels = d.channels || [];
           settings.value.maxChannelsPerSearch = d.maxChannelsPerSearch || 8;
+          // V1.6：转存开关出厂为关，恢复出厂时一并回到关
+          if (typeof d.transferEnabled === 'boolean') settings.value.transferEnabled = d.transferEnabled;
           if (Array.isArray(d.visibleCloudTypes)) settings.value.visibleCloudTypes = d.visibleCloudTypes;
           if (d.resultCacheMode) settings.value.resultCacheMode = d.resultCacheMode;
           // 插件源一并恢复为「内置全开」

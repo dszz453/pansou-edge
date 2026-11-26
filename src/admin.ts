@@ -84,7 +84,9 @@ export function buildDefaultSettings(env: Env): SystemSettings {
     showAutoCheck: true,
     // V1.3：前台默认不需要密码，开关打开后才要求登录
     frontendAuthEnabled: false,
-    frontendPasswordMode: 'reuse'
+    frontendPasswordMode: 'reuse',
+    // V1.6：转存功能默认关闭，站长在后台确认风险后再开
+    transferEnabled: false
   };
 }
 
@@ -165,7 +167,9 @@ function mergeWithDefaults(defaults: SystemSettings, saved: any): SystemSettings
     frontendPasswordHash:
       typeof saved.frontendPasswordHash === 'string' && saved.frontendPasswordHash
         ? saved.frontendPasswordHash
-        : undefined
+        : undefined,
+    // V1.6：转存开关，缺失/非法值一律视为关闭（安全默认）
+    transferEnabled: saved.transferEnabled === true
   };
 
   // 插件配置一次性迁移：老 KV 里只有第三方聚合节点，不补就永远拿不到原生源。
